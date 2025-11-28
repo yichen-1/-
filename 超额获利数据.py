@@ -1,26 +1,29 @@
 import streamlit as st
-import os
 import pandas as pd
 import re
-from pathlib import Path
 from io import BytesIO
+import datetime
 
 # -------------------------- 页面配置 --------------------------
 st.set_page_config(
-    page_title="光伏/风电功率数据提取工具",
+    page_title="光伏/风电功率数据提取工具（导入版）",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# -------------------------- 固定配置（可在网页侧边栏修改） --------------------------
+# -------------------------- 侧边栏配置（保留核心参数） --------------------------
 st.sidebar.header("⚙️ 配置项")
-target_dir = st.sidebar.text_input(
-    "目标文件夹路径",
-    value=r"C:\Users\2斤羊肉\Desktop\协合\湖北\超额获利回收\11月",
-    placeholder="粘贴文件夹绝对路径"
+# 移除文件夹路径，改为文件上传
+st.sidebar.subheader("📁 上传Excel文件")
+uploaded_files = st.sidebar.file_uploader(
+    "选择月度Excel文件（支持多选）",
+    type=["xlsx", "xls", "xlsm"],
+    accept_multiple_files=True
 )
-file_keyword = st.sidebar.text_input("文件筛选关键词", value="历史趋势")
+
+# 核心参数配置（不变）
+file_keyword = st.sidebar.text_input("文件筛选关键词（仅显示含该关键词的文件）", value="历史趋势")
 time_col_idx = st.sidebar.number_input("时间列索引（E列=4）", value=4, min_value=0)
 power_col_idx_wind = st.sidebar.number_input("风电场功率列索引（J列=9）", value=9, min_value=0)
 power_col_idx_pv = st.sidebar.number_input("光伏场功率列索引（F列=5）", value=5, min_value=0)
@@ -50,58 +53,61 @@ def clean_power_data(value):
 
 def extract_station_name(file_name):
     """从文件名提取场站名"""
-    name_without_ext = os.path.splitext(file_name)[0]
+    name_without_ext = file_name.split(".")[0]  # 处理上传文件的文件名（无路径）
     station_name = name_without_ext.split("-")[0].strip()
     return station_name
 
 @st.cache_data(show_spinner="提取Excel数据中...")
-def extract_excel_data(file_path, time_idx, power_idx, skip_r, conv):
-    """提取单个Excel文件数据"""
+def extract_excel_data(uploaded_file, time_idx, power_idx, skip_r, conv):
+    """提取单个上传Excel文件的数据（适配BytesIO流）"""
     try:
-        suffix = file_path.suffix.lower()
-        engine = "openpyxl" if suffix in [".xlsx", ".xlsm"] else "xlrd"
+        # 识别文件格式，选择引擎
+        file_name = uploaded_file.name
+        suffix = file_name.split(".")[-1].lower()
+        engine = "openpyxl" if suffix in ["xlsx", "xlsm"] else "xlrd"
         
+        # 读取上传的文件流
         df = pd.read_excel(
-            file_path,
+            BytesIO(uploaded_file.getvalue()),  # 转换为字节流
             header=None,
             usecols=[time_idx, power_idx],
             skiprows=skip_r,
             engine=engine
         )
         
+        # 数据清洗
         df.columns = ["时间", "功率(kW)"]
         df["功率(kW)"] = df["功率(kW)"].apply(clean_power_data)
         df["时间"] = pd.to_datetime(df["时间"], errors="coerce")
         df = df.dropna(subset=["时间", "功率(kW)"])
         
         if df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), file_name
         
-        station_name = extract_station_name(file_path.name)
+        # 提取场站名并转换单位
+        station_name = extract_station_name(file_name)
         df[station_name] = df["功率(kW)"] / conv
         df_result = df[["时间", station_name]].reset_index(drop=True)
-        return df_result
+        return df_result, file_name
     except Exception as e:
-        st.error(f"处理 {file_path.name} 失败：{str(e)}")
-        return pd.DataFrame()
+        st.error(f"处理 {uploaded_file.name} 失败：{str(e)}")
+        return pd.DataFrame(), uploaded_file.name
 
-# -------------------------- 批量处理函数 --------------------------
-def batch_extract_data():
-    # 1. 验证文件夹
-    if not os.path.exists(target_dir):
-        st.error("❌ 目标文件夹不存在！请核对路径")
-        return None, {}
-    
-    # 2. 筛选文件
-    excel_exts = [".xlsx", ".xls", ".xlsm"]
-    excel_files = [f for f in Path(target_dir).glob("*") if f.is_file() and f.suffix.lower() in excel_exts]
-    target_files = [f for f in excel_files if file_keyword in f.name or file_keyword.lower() in f.name.lower()]
+# -------------------------- 批量处理函数（适配上传文件） --------------------------
+def batch_extract_data(uploaded_files_list):
+    # 1. 筛选含关键词的文件
+    target_files = []
+    for file in uploaded_files_list:
+        if file_keyword in file.name or file_keyword.lower() in file.name.lower():
+            target_files.append(file)
+        else:
+            st.warning(f"⚠️ {file.name} 不含关键词「{file_keyword}」，已跳过")
     
     if not target_files:
-        st.error(f"❌ 未找到包含「{file_keyword}」的Excel文件")
+        st.error(f"❌ 未找到包含「{file_keyword}」的上传文件")
         return None, {}
     
-    # 3. 显示待处理文件
+    # 2. 显示待处理文件
     st.info(f"✅ 找到 {len(target_files)} 个待处理文件：")
     file_list = []
     for i, f in enumerate(target_files, 1):
@@ -110,7 +116,7 @@ def batch_extract_data():
         file_list.append(f"{i}. {station_type} {f.name}")
     st.code("\n".join(file_list))
     
-    # 4. 批量提取
+    # 3. 批量提取
     all_station_dfs = {}
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -125,7 +131,7 @@ def batch_extract_data():
         else:
             power_idx = power_col_idx_wind
         
-        file_data = extract_excel_data(file, time_col_idx, power_idx, skip_rows, power_conversion)
+        file_data, file_name = extract_excel_data(file, time_col_idx, power_idx, skip_rows, power_conversion)
         if not file_data.empty:
             all_station_dfs[station_name] = file_data
             st.success(f"✅ {station_name}：提取到 {len(file_data)} 条有效数据")
@@ -133,7 +139,7 @@ def batch_extract_data():
     
     status_text.text("处理完成！开始合并数据...")
     
-    # 5. 合并数据
+    # 4. 合并数据
     if not all_station_dfs:
         st.error("❌ 未提取到任何有效数据")
         return None, {}
@@ -146,12 +152,13 @@ def batch_extract_data():
     merged_df["时间"] = merged_df["时间"].dt.floor("min")
     merged_df = merged_df.sort_values("时间").reset_index(drop=True)
     
-    # 6. 统计数据
+    # 5. 统计数据
     st.success("📊 数据合并完成！")
     st.info(f"""
     统计信息：
     - 总时间点数：{len(merged_df)}
     - 包含场站：{', '.join(merged_df.columns[1:])}
+    - 处理时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     """)
     
     # 显示各场站数据量
@@ -178,54 +185,68 @@ def to_excel(df):
     return output
 
 # -------------------------- 网页主界面 --------------------------
-st.title("📊 光伏/风电功率数据提取工具")
+st.title("📊 光伏/风电功率数据提取工具（月度导入版）")
 st.markdown("---")
 
-# 执行按钮
-if st.button("🚀 开始提取数据", type="primary"):
-    with st.spinner("正在批量处理文件..."):
-        result_df, station_dfs = batch_extract_data()
-        
-        if result_df is not None and not result_df.empty:
-            # 数据预览
-            st.markdown("---")
-            st.subheader("📈 数据预览")
+# 提示信息
+st.info("""
+### 📝 使用指引
+1. 在左侧侧边栏上传本月的Excel数据文件（支持多选）
+2. 确认列索引/光伏场站等配置（首次配置后无需修改）
+3. 点击下方按钮开始提取数据
+4. 预览数据后下载整合文件
+""")
+
+# 执行按钮（仅当有文件上传时可用）
+if uploaded_files:
+    if st.button("🚀 开始提取数据", type="primary"):
+        with st.spinner("正在批量处理上传的文件..."):
+            result_df, station_dfs = batch_extract_data(uploaded_files)
             
-            # 切换预览标签
-            tab1, tab2 = st.tabs(["全部数据", "光伏场站数据"])
-            with tab1:
-                st.dataframe(result_df.head(20), use_container_width=True)
-            with tab2:
-                # 筛选光伏场站数据
-                pv_cols = [col for col in result_df.columns if col in pv_stations_list]
-                if pv_cols:
-                    pv_df = result_df[["时间"] + pv_cols].dropna(subset=pv_cols, how="all")
-                    st.dataframe(pv_df.head(20), use_container_width=True)
-                else:
-                    st.info("暂无光伏场站数据")
-            
-            # 下载按钮
-            st.markdown("---")
-            st.subheader("📥 下载结果")
-            excel_data = to_excel(result_df)
-            st.download_button(
-                label="下载整合数据（Excel）",
-                data=excel_data,
-                file_name="整合数据_历史趋势.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            if result_df is not None and not result_df.empty:
+                # 数据预览
+                st.markdown("---")
+                st.subheader("📈 数据预览")
+                
+                # 切换预览标签
+                tab1, tab2 = st.tabs(["全部数据", "光伏场站数据"])
+                with tab1:
+                    st.dataframe(result_df.head(50), use_container_width=True)
+                with tab2:
+                    # 筛选光伏场站数据
+                    pv_cols = [col for col in result_df.columns if col in pv_stations_list]
+                    if pv_cols:
+                        pv_df = result_df[["时间"] + pv_cols].dropna(subset=pv_cols, how="all")
+                        st.dataframe(pv_df.head(50), use_container_width=True)
+                    else:
+                        st.info("暂无光伏场站数据")
+                
+                # 下载按钮
+                st.markdown("---")
+                st.subheader("📥 下载结果")
+                # 生成带年月的文件名（适配月度数据）
+                current_month = datetime.datetime.now().strftime("%Y%m")
+                excel_data = to_excel(result_df)
+                st.download_button(
+                    label="下载整合数据（Excel）",
+                    data=excel_data,
+                    file_name=f"整合数据_历史趋势_{current_month}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+else:
+    st.warning("⚠️ 请先在左侧侧边栏上传Excel数据文件！")
 
 # 侧边栏说明
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 使用说明")
 st.sidebar.markdown("""
-1. 粘贴目标文件夹绝对路径（支持中文）
+1. 上传本月的历史趋势Excel文件（支持多选）
 2. 确认列索引配置：
    - 时间列：E列=4（索引从0开始）
    - 风电功率列：J列=9
    - 光伏功率列：F列=5
 3. 点击「开始提取数据」
-4. 预览数据后下载Excel文件
+4. 预览数据后下载月度整合文件
 """)
 
 st.sidebar.markdown("### ℹ️ 注意事项")
@@ -233,4 +254,5 @@ st.sidebar.markdown("""
 - 支持.xlsx/.xls/.xlsm格式
 - 自动区分光伏/风电场站列索引
 - 数据按时间对齐，NaN表示无数据
+- 下载文件名自动带年月，方便归档
 """)
