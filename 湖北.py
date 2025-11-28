@@ -128,24 +128,21 @@ def load_contract_files(selected_months):
                 contract_files.append(bytes_io)
     return contract_files
 
-# ---------------------- 核心业务函数（无修改） ----------------------
+# ---------------------- 核心业务函数 ----------------------
 def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping):
     """生成电量电价整合文件"""
     unit_data = {unit: [] for unit in unit_station_mapping.keys()}
     
     for file_idx, uploaded_file in enumerate(source_excel_files):
-        st.write(f"🔍 处理文件：{uploaded_file.name}")
         try:
             xls = pd.ExcelFile(uploaded_file, engine='openpyxl')
             for sheet in xls.sheet_names:
                 df = xls.parse(sheet)
                 if df.empty or df.shape[1] < 1:
-                    st.write(f"  - 工作表'{sheet}'无数据，跳过")
                     continue
                 
                 key_df = extract_key_columns(df)
                 if key_df.empty:
-                    st.write(f"  - 工作表'{sheet}'无电量/电价列，跳过")
                     continue
                 
                 for idx, row in df.iterrows():
@@ -161,13 +158,11 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
                     except Exception as e:
                         continue
         except Exception as e:
-            st.error(f"处理文件 {uploaded_file.name} 出错：{str(e)}")
             continue
     
     output_io = BytesIO()
     with pd.ExcelWriter(output_io, engine='openpyxl', mode='w') as writer:
         for cleaned_unit, station_name in unit_station_mapping.items():
-            st.write(f"📝 生成{station_name}工作表")
             data_list = unit_data.get(cleaned_unit, [])
             if not data_list:
                 pd.DataFrame({"提示": [f"无有效数据：{cleaned_unit}"]}).to_excel(
@@ -187,7 +182,6 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
             
             merged_df.to_excel(writer, sheet_name=station_name, index=False)
             format_worksheet(writer.sheets[station_name])
-            st.write(f"  ✅ {station_name}：{len(merged_df)}行数据")
     
     output_io.seek(0)
     return output_io
@@ -207,11 +201,9 @@ def process_power_forecast_streamlit(forecast_file):
                 try:
                     df = xls.parse(sheet_name)
                 except Exception as e:
-                    st.error(f"解析工作表 '{sheet_name}' 出错：{str(e)}")
                     continue
                 
                 if df.empty or df.shape[0] < 4 or df.shape[1] < 2:
-                    st.write(f"工作表 '{sheet_name}' 数据结构异常，跳过")
                     continue
                 
                 time_column = df.iloc[:, 0]
@@ -235,7 +227,6 @@ def process_power_forecast_streamlit(forecast_file):
                 df = df[valid_times_mask].reset_index(drop=True)
                 
                 if not times:
-                    st.write(f"工作表 '{sheet_name}' 无有效时间数据，跳过")
                     continue
                 
                 processed_data = []
@@ -256,11 +247,9 @@ def process_power_forecast_streamlit(forecast_file):
                                 row = [col_date] + averaged_data
                                 processed_data.append(row)
                     except Exception as e:
-                        st.write(f"处理列 '{col}' 出错：{str(e)}")
                         continue
                 
                 if not processed_data:
-                    st.write(f"工作表 '{sheet_name}' 无有效预测数据，跳过")
                     continue
                 
                 time_points = [time(hour=i) for i in range(24)]
@@ -276,32 +265,28 @@ def process_power_forecast_streamlit(forecast_file):
                 processed_df = processed_df.dropna(axis=1, how='all')
                 processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
                 format_worksheet(writer.sheets[sheet_name])
-                st.write(f"✅ 工作表 '{sheet_name}' 处理完成")
     
     except Exception as e:
-        st.error(f"处理预测数据出错：{str(e)}")
+        pass
     
     output_io.seek(0)
     return output_io
 
-def process_price_quantity_streamlit(price_quantity_file, summary_file):
-    """处理电价电量数据"""
+def process_price_quantity_streamlit(price_quantity_file):
+    """处理电价电量数据（删除汇总文件相关逻辑）"""
     output_io = BytesIO()
     try:
         xls_input = pd.ExcelFile(price_quantity_file, engine='openpyxl')
-        xls_summary = pd.ExcelFile(summary_file, engine='openpyxl') if summary_file else None
-        
         sheet_names = xls_input.sheet_names
+        
         with pd.ExcelWriter(output_io, engine='openpyxl') as writer:
             for sheet_name in sheet_names:
                 try:
                     df = xls_input.parse(sheet_name)
                 except Exception as e:
-                    st.error(f"解析工作表 '{sheet_name}' 出错：{str(e)}")
                     continue
                 
                 if df.empty:
-                    st.write(f"工作表 '{sheet_name}' 为空，跳过")
                     continue
                 
                 date_col = next((col for col in df.columns if '日期' in str(col)), None)
@@ -309,7 +294,6 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                 price_cols = [col for col in df.columns if '电价' in str(col)]
                 
                 if not date_col or not quantity_cols:
-                    st.write(f"工作表 '{sheet_name}' 缺少日期/电量列，跳过")
                     continue
                 
                 dates = []
@@ -324,60 +308,30 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                         prices = [truncate_to_two_decimal(row[col]) for col in price_cols]
                         price_data.append(prices)
                     except Exception as e:
-                        st.write(f"解析{sheet_name}第{idx+1}行出错：{str(e)}")
                         continue
                 
                 if not dates or not quantity_data:
-                    st.write(f"工作表 '{sheet_name}' 无有效数据，跳过")
                     continue
                 
-                date_to_summary = {}
-                if xls_summary and sheet_name in xls_summary.sheet_names:
-                    try:
-                        summary_df = xls_summary.parse(sheet_name)
-                        summary_date_col = summary_df.columns[0] if not summary_df.empty else None
-                        if summary_date_col:
-                            for idx, row in summary_df.iterrows():
-                                try:
-                                    s_date = pd.to_datetime(row[summary_date_col]).date()
-                                    s_quantity = truncate_to_two_decimal(row[1]) if len(row) > 1 and pd.notna(row[1]) else None
-                                    if s_date and s_quantity:
-                                        date_to_summary[s_date] = s_quantity
-                                except:
-                                    continue
-                    except Exception as e:
-                        st.write(f"读取{sheet_name}汇总数据出错：{str(e)}")
-                
+                # 直接生成数据（删除汇总文件相关逻辑）
                 processed_data = []
                 for i, (date, quantities, prices) in enumerate(zip(dates, quantity_data, price_data)):
                     row_data = [date] + quantities + prices
                     processed_data.append(row_data)
-                    
-                    if date in date_to_summary:
-                        diffs = []
-                        for q in quantities:
-                            if pd.notna(q):
-                                diff = q - date_to_summary[date]
-                                diffs.append(truncate_to_two_decimal(diff))
-                            else:
-                                diffs.append(None)
-                        diff_row = [f"{date} (差额)"] + diffs + prices
-                        processed_data.append(diff_row)
                 
                 output_cols = ['日期'] + quantity_cols + price_cols
                 processed_df = pd.DataFrame(processed_data, columns=output_cols)
                 processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
                 format_worksheet(writer.sheets[sheet_name])
-                st.write(f"✅ 工作表 '{sheet_name}' 处理完成")
     
     except Exception as e:
-        st.error(f"处理电价电量数据出错：{str(e)}")
+        pass
     
     output_io.seek(0)
     return output_io
 
 def calculate_difference_streamlit(forecast_file, price_quantity_file):
-    """计算差值（返回字节流+数据字典，用于展示）"""
+    """计算差值（仅返回数据字典，用于展示）"""
     station_coefficient = {
         '风储一期': 0.8*0.725*0.7 ,   
         '风储二期': 0.8*0.725*0.7,
@@ -388,7 +342,6 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
         '浠水渔光': 0.8*0.775*0.8
     }
     
-    output_io = BytesIO()
     # 用于展示的数据字典：{场站名: 数据框}
     result_data = {}
     
@@ -399,126 +352,95 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
         forecast_sheet_names = forecast_xls.sheet_names
         price_quantity_sheet_names = price_quantity_xls.sheet_names
 
-        with pd.ExcelWriter(output_io, engine='openpyxl') as writer:
-            for sheet_name in forecast_sheet_names:
-                if sheet_name == '填写说明':
-                    continue
-                if sheet_name not in price_quantity_sheet_names:
-                    st.write(f"工作表 '{sheet_name}' 在电价电量文件中不存在，跳过")
+        for sheet_name in forecast_sheet_names:
+            if sheet_name == '填写说明':
+                continue
+            if sheet_name not in price_quantity_sheet_names:
+                continue
+
+            try:
+                forecast_df = forecast_xls.parse(sheet_name)
+                price_quantity_df = price_quantity_xls.parse(sheet_name)
+            except Exception as e:
+                continue
+
+            if forecast_df.empty or len(forecast_df.columns) < 2:
+                continue
+            
+            current_coeff = station_coefficient.get(sheet_name, 1.0)
+            
+            time_col = forecast_df.iloc[:, 0]
+            forecast_cols = forecast_df.columns[1:]
+            quantity_cols = [col for col in price_quantity_df.columns if '电量' in str(col)]
+            price_cols = [col for col in price_quantity_df.columns if '电价' in str(col)]
+            
+            if not quantity_cols:
+                continue
+            quantity_col = quantity_cols[0]
+            price_col = price_cols[0] if price_cols else None
+
+            processed_data = []
+            for idx, row in forecast_df.iterrows():
+                if idx >= len(price_quantity_df):
                     continue
 
-                try:
-                    forecast_df = forecast_xls.parse(sheet_name)
-                    price_quantity_df = price_quantity_xls.parse(sheet_name)
-                except Exception as e:
-                    st.error(f"解析{sheet_name}出错：{str(e)}")
-                    continue
-
-                if forecast_df.empty or len(forecast_df.columns) < 2:
-                    st.write(f"{sheet_name}预测数据为空，跳过")
-                    continue
+                current_time = row[0]
+                row_data = [current_time]
+                current_price = truncate_to_two_decimal(price_quantity_df.iloc[idx][price_col]) if (price_col and pd.notna(price_quantity_df.iloc[idx][price_col])) else None
                 
-                current_coeff = station_coefficient.get(sheet_name, 1.0)
-                st.write(f"🔧 处理{sheet_name}：功率预测系数 = {round(current_coeff, 4)}")
-                
-                time_col = forecast_df.iloc[:, 0]
-                forecast_cols = forecast_df.columns[1:]
-                quantity_cols = [col for col in price_quantity_df.columns if '电量' in str(col)]
-                price_cols = [col for col in price_quantity_df.columns if '电价' in str(col)]
-                
-                if not quantity_cols:
-                    st.write(f"{sheet_name}无电量列，跳过")
-                    continue
-                quantity_col = quantity_cols[0]
-                price_col = price_cols[0] if price_cols else None
-
-                processed_data = []
-                for idx, row in forecast_df.iterrows():
-                    if idx >= len(price_quantity_df):
-                        st.write(f"{sheet_name}数据行数不足，第{idx+1}行跳过")
-                        continue
-
-                    current_time = row[0]
-                    row_data = [current_time]
-                    current_price = truncate_to_two_decimal(price_quantity_df.iloc[idx][price_col]) if (price_col and pd.notna(price_quantity_df.iloc[idx][price_col])) else None
-                    
-                    for col in forecast_cols:
-                        forecast_val = row[col]
-                        row_data.append(forecast_val)
-                        
-                        try:
-                            quantity_val = price_quantity_df.iloc[idx][quantity_col]
-                            if pd.notna(forecast_val) and pd.notna(quantity_val):
-                                corrected_forecast = float(forecast_val) * current_coeff
-                                diff_val = truncate_to_two_decimal(corrected_forecast - float(quantity_val))
-                                
-                                if diff_val < 0:
-                                    max_negative = -float(quantity_val)
-                                    diff_val = max(diff_val, max_negative)
-                                
-                                row_data.append(diff_val)
-                            else:
-                                row_data.append(None)
-                        except Exception as e:
-                            st.write(f"  计算{sheet_name}第{idx+1}行{col}列差值出错：{str(e)}")
-                            row_data.append(None)
-                    
-                    row_data.append(current_price)
-                    processed_data.append(row_data)
-
-                new_cols = ['时间']
                 for col in forecast_cols:
-                    new_cols.extend([col, f'{col} (修正后差额)'])
-                new_cols.append('对应时段电价')
+                    forecast_val = row[col]
+                    row_data.append(forecast_val)
+                    
+                    try:
+                        quantity_val = price_quantity_df.iloc[idx][quantity_col]
+                        if pd.notna(forecast_val) and pd.notna(quantity_val):
+                            corrected_forecast = float(forecast_val) * current_coeff
+                            diff_val = truncate_to_two_decimal(corrected_forecast - float(quantity_val))
+                            
+                            if diff_val < 0:
+                                max_negative = -float(quantity_val)
+                                diff_val = max(diff_val, max_negative)
+                            
+                            row_data.append(diff_val)
+                        else:
+                            row_data.append(None)
+                    except Exception as e:
+                        row_data.append(None)
                 
-                processed_df = pd.DataFrame(processed_data, columns=new_cols)
-                if '对应时段电价' in processed_df.columns:
-                    processed_df['对应时段电价'] = processed_df['对应时段电价'].apply(truncate_to_two_decimal)
-                
-                # 保存到结果字典（用于展示）
-                result_data[sheet_name] = processed_df.copy()
-                
-                processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                worksheet = writer.sheets[sheet_name]
-                format_worksheet(worksheet)
-                
-                # 负值标黄
-                yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-                for col_idx in range(2, len(new_cols)-1, 2):
-                    col_letter = chr(65 + col_idx)
-                    for row_idx in range(1, len(processed_df) + 1):
-                        cell = worksheet[f'{col_letter}{row_idx + 1}']
-                        try:
-                            val = float(cell.value) if cell.value is not None else None
-                            if val is not None and val < 0:
-                                cell.fill = yellow_fill
-                        except:
-                            continue
+                row_data.append(current_price)
+                processed_data.append(row_data)
 
-                st.write(f"✅ 工作表 '{sheet_name}' 处理完成")
+            new_cols = ['时间']
+            for col in forecast_cols:
+                new_cols.extend([col, f'{col} (修正后差额)'])
+            new_cols.append('对应时段电价')
+            
+            processed_df = pd.DataFrame(processed_data, columns=new_cols)
+            if '对应时段电价' in processed_df.columns:
+                processed_df['对应时段电价'] = processed_df['对应时段电价'].apply(truncate_to_two_decimal)
+            
+            # 保存到结果字典（用于展示）
+            result_data[sheet_name] = processed_df.copy()
     
     except Exception as e:
         st.error(f"计算差值出错：{str(e)}")
     
-    output_io.seek(0)
-    return output_io, result_data
+    return result_data
 
-# ---------------------- 页面交互 ----------------------
-def main():
-    st.title("📊 功率预测与电价电量分析系统")
-    st.divider()
-    
+# ---------------------- 页面主逻辑（适配菜单扩展） ----------------------
+def power_analysis_module():
+    """功率分析模块（可作为菜单子模块调用）"""
     # 侧边栏
     with st.sidebar:
         st.header("📁 文件管理")
         
         # 1. 批量上传月度合约文件
         st.subheader("1. 批量上传月度合约文件")
-        # 核心修改：支持多文件上传
         new_contract_files = st.file_uploader(
             "选择合约文件（支持批量上传）",
             type=["xlsx", "xls"],
-            accept_multiple_files=True,  # 开启批量上传
+            accept_multiple_files=True,
             key="new_contract"
         )
         selected_month = st.text_input(
@@ -537,7 +459,6 @@ def main():
                 with st.spinner("批量保存文件中..."):
                     saved_files = []
                     failed_files = []
-                    # 循环处理每个上传的文件
                     for file in new_contract_files:
                         try:
                             save_path = save_monthly_contract_file(file, selected_month)
@@ -545,7 +466,6 @@ def main():
                         except Exception as e:
                             failed_files.append(f"{file.name} - {str(e)}")
                     
-                    # 展示保存结果
                     if saved_files:
                         st.success(f"✅ 成功保存 {len(saved_files)} 个文件：")
                         for fname in saved_files:
@@ -574,88 +494,55 @@ def main():
             selected_months = []
             st.info("暂无已上传的月度合约文件，请先上传")
         
-        # 3. 上传其他必要文件
-        st.subheader("3. 其他文件")
+        # 3. 上传功率预测文件（删除汇总文件）
+        st.subheader("3. 功率预测文件")
         forecast_file = st.file_uploader(
-            "功率预测文件（2025功率预测.xlsx）",
+            "上传功率预测文件（2025功率预测.xlsx）",
             type=["xlsx", "xls"],
             key="forecast"
         )
-        summary_file = st.file_uploader(
-            "汇总文件（汇总.xlsx，可选）",
-            type=["xlsx", "xls"],
-            key="summary"
-        )
         
-        # 映射配置
-        st.header("⚙️ 映射配置")
-        unit_to_station = {
-            "襄阳协合峪山泉水风电": "峪山一期",
-            "荆门协合圣境山风电": "圣境山",
-            "襄阳聚合光伏": "襄北农光",
-            "三王（协合襄北）风电": "风储一期",
-            "荆门协合栗溪风电": "栗溪",
-            "襄州协合三王风光储能电站风电二期": "风储二期",
-            "浠水聚合关口光伏": "浠水渔光"
-        }
-        with st.expander("查看交易单元映射"):
+        # 映射配置（折叠展示）
+        with st.expander("⚙️ 交易单元映射配置", expanded=False):
+            unit_to_station = {
+                "襄阳协合峪山泉水风电": "峪山一期",
+                "荆门协合圣境山风电": "圣境山",
+                "襄阳聚合光伏": "襄北农光",
+                "三王（协合襄北）风电": "风储一期",
+                "荆门协合栗溪风电": "栗溪",
+                "襄州协合三王风光储能电站风电二期": "风储二期",
+                "浠水聚合关口光伏": "浠水渔光"
+            }
             for k, v in unit_to_station.items():
                 st.write(f"• {k} → {v}")
     
     # 主页面
-    st.header("🚀 执行分析流程")
+    st.title("📊 功率预测与电价电量分析")
+    st.divider()
     
     # 执行按钮（禁用条件：无选中月份/无预测文件）
     run_disabled = not (selected_months and forecast_file)
-    if st.button("开始处理", type="primary", disabled=run_disabled):
-        with st.spinner("正在处理数据，请稍候..."):
+    if st.button("开始测算", type="primary", disabled=run_disabled):
+        with st.spinner("正在测算数据，请稍候..."):
             # 加载选中月份的合约文件
-            st.write("📥 加载选中月份的合约文件：")
             contract_files = load_contract_files(selected_months)
-            for f in contract_files:
-                st.write(f"  - {f.name if hasattr(f, 'name') else os.path.basename(f)}")
             
-            # 步骤1：生成整合文件
-            st.subheader("步骤1：生成电量电价整合文件")
+            # 执行核心处理流程（无页面输出）
+            unit_to_station = {
+                "襄阳协合峪山泉水风电": "峪山一期",
+                "荆门协合圣境山风电": "圣境山",
+                "襄阳聚合光伏": "襄北农光",
+                "三王（协合襄北）风电": "风储一期",
+                "荆门协合栗溪风电": "栗溪",
+                "襄州协合三王风光储能电站风电二期": "风储二期",
+                "浠水聚合关口光伏": "浠水渔光"
+            }
             integrated_io = generate_integrated_file_streamlit(contract_files, unit_to_station)
-            st.download_button(
-                label="📥 下载电量电价整合文件",
-                data=integrated_io,
-                file_name="电量电价整合.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            # 步骤2：处理预测数据
-            st.subheader("步骤2：处理功率预测数据")
             forecast_processed_io = process_power_forecast_streamlit(forecast_file)
-            st.download_button(
-                label="📥 下载处理后功率预测文件",
-                data=forecast_processed_io,
-                file_name="2025功率预测_处理后.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            # 步骤3：处理电价电量数据
-            st.subheader("步骤3：处理电价电量数据")
-            price_quantity_processed_io = process_price_quantity_streamlit(integrated_io, summary_file)
-            st.download_button(
-                label="📥 下载处理后电价电量文件",
-                data=price_quantity_processed_io,
-                file_name="电量电价整合_处理后.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            # 步骤4：计算差值（获取展示数据）
-            st.subheader("步骤4：计算功率预测与电量差值")
-            difference_io, result_data = calculate_difference_streamlit(forecast_processed_io, integrated_io)
-            st.download_button(
-                label="📥 下载调整结果文件",
-                data=difference_io,
-                file_name="调整结果.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            price_quantity_processed_io = process_price_quantity_streamlit(integrated_io)
+            result_data = calculate_difference_streamlit(forecast_processed_io, integrated_io)
         
-        # 展示最终结果
+        # 仅展示最终汇总数据
         st.divider()
         st.header("📈 最终汇总数据展示")
         if result_data:
@@ -685,7 +572,7 @@ def main():
         else:
             st.warning("暂无可展示的结果数据")
         
-        st.success("✅ 所有处理已完成！")
+        st.success("✅ 测算完成！")
     
     # 提示信息
     if run_disabled:
@@ -693,6 +580,19 @@ def main():
             st.warning("⚠️ 请先上传并选择要分析的月度合约文件！")
         elif not forecast_file:
             st.warning("⚠️ 请先上传功率预测文件！")
+
+# ---------------------- 主入口（适配菜单扩展） ----------------------
+def main():
+    # 这里可以添加菜单逻辑，后续扩展其他模块
+    menu_options = ["功率预测分析", "其他模块1", "其他模块2"]
+    selected_menu = st.sidebar.selectbox("📋 功能菜单", menu_options)
+    
+    if selected_menu == "功率预测分析":
+        power_analysis_module()
+    elif selected_menu == "其他模块1":
+        st.write("后续添加其他模块1的代码")
+    elif selected_menu == "其他模块2":
+        st.write("后续添加其他模块2的代码")
 
 if __name__ == "__main__":
     main()
