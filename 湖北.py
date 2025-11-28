@@ -9,13 +9,10 @@ from io import BytesIO
 import shutil
 
 # ---------------------- 全局配置 ----------------------
-# 持久化存储目录（部署时可修改为绝对路径）
 STORAGE_DIR = os.path.join(os.path.expanduser('~'), 'power_analysis_storage')
 CONTRACT_DIR = os.path.join(STORAGE_DIR, 'monthly_contracts')
-# 自动创建存储目录
 os.makedirs(CONTRACT_DIR, exist_ok=True)
 
-# 设置页面配置
 st.set_page_config(
     page_title="连续竞价调整系统",
     page_icon="📊",
@@ -24,7 +21,6 @@ st.set_page_config(
 
 # ---------------------- 工具函数 ----------------------
 def clean_unit_name(unit_name):
-    """清理交易单元名称：去除括号及括号内的内容"""
     if pd.isna(unit_name) or unit_name == '':
         return ""
     unit_str = str(unit_name).strip()
@@ -32,7 +28,6 @@ def clean_unit_name(unit_name):
     return cleaned_str
 
 def truncate_to_two_decimal(x):
-    """将数值截断到两位小数（只舍不入）"""
     if pd.isna(x):
         return None
     try:
@@ -41,7 +36,6 @@ def truncate_to_two_decimal(x):
         return None
 
 def format_worksheet(worksheet):
-    """设置工作表格式：内容居中，列宽30"""
     alignment = Alignment(horizontal='center', vertical='center')
     for row in worksheet.iter_rows():
         for cell in row:
@@ -50,7 +44,6 @@ def format_worksheet(worksheet):
         worksheet.column_dimensions[col[0].column_letter].width = 30
 
 def extract_key_columns(df):
-    """提取关键列（日期、时段、电量、电价）"""
     key_columns = {
         '日期': None,
         '时段': None,
@@ -76,7 +69,6 @@ def extract_key_columns(df):
     return df[selected_cols].copy()
 
 def is_valid_excel_bytes(excel_bytes):
-    """校验Excel字节流有效性"""
     try:
         with zipfile.ZipFile(BytesIO(excel_bytes), 'r') as zf:
             return '[Content_Types].xml' in zf.namelist()
@@ -85,28 +77,22 @@ def is_valid_excel_bytes(excel_bytes):
 
 # ---------------------- 持久化相关函数 ----------------------
 def save_monthly_contract_file(uploaded_file, month):
-    """保存月度合约文件到本地存储"""
-    # 生成文件名：月份_原文件名
     safe_filename = re.sub(r'[^\w\.-]', '_', uploaded_file.name)
     save_path = os.path.join(CONTRACT_DIR, f"{month}_{safe_filename}")
-    # 保存文件
     with open(save_path, 'wb') as f:
         f.write(uploaded_file.getbuffer())
     return save_path
 
 def get_uploaded_months():
-    """获取已上传的月份列表"""
     months = set()
     for filename in os.listdir(CONTRACT_DIR):
         if filename.startswith(('2025-', '2024-')) and (filename.endswith('.xlsx') or filename.endswith('.xls')):
-            # 提取月份（格式：2025-11）
             month_part = filename.split('_')[0]
             if len(month_part) == 7 and '-' in month_part:
                 months.add(month_part)
     return sorted(list(months))
 
 def get_files_by_month(month):
-    """获取指定月份的合约文件列表"""
     files = []
     for filename in os.listdir(CONTRACT_DIR):
         if filename.startswith(f"{month}_") and (filename.endswith('.xlsx') or filename.endswith('.xls')):
@@ -116,21 +102,18 @@ def get_files_by_month(month):
     return files
 
 def load_contract_files(selected_months):
-    """加载选中月份的所有合约文件"""
     contract_files = []
     for month in selected_months:
         month_files = get_files_by_month(month)
         for file_path in month_files:
-            # 转换为BytesIO供pandas读取
             with open(file_path, 'rb') as f:
                 bytes_io = BytesIO(f.read())
-                bytes_io.name = os.path.basename(file_path)  # 保留文件名
+                bytes_io.name = os.path.basename(file_path)
                 contract_files.append(bytes_io)
     return contract_files
 
 # ---------------------- 核心业务函数 ----------------------
 def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping):
-    """生成电量电价整合文件"""
     unit_data = {unit: [] for unit in unit_station_mapping.keys()}
     
     for file_idx, uploaded_file in enumerate(source_excel_files):
@@ -187,7 +170,6 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
     return output_io
 
 def process_power_forecast_streamlit(forecast_file):
-    """处理功率预测数据"""
     output_io = BytesIO()
     try:
         xls = pd.ExcelFile(forecast_file, engine='openpyxl')
@@ -273,7 +255,6 @@ def process_power_forecast_streamlit(forecast_file):
     return output_io
 
 def process_price_quantity_streamlit(price_quantity_file):
-    """处理电价电量数据"""
     output_io = BytesIO()
     try:
         xls_input = pd.ExcelFile(price_quantity_file, engine='openpyxl')
@@ -313,7 +294,6 @@ def process_price_quantity_streamlit(price_quantity_file):
                 if not dates or not quantity_data:
                     continue
                 
-                # 生成数据
                 processed_data = []
                 for i, (date, quantities, prices) in enumerate(zip(dates, quantity_data, price_data)):
                     row_data = [date] + quantities + prices
@@ -330,27 +310,24 @@ def process_price_quantity_streamlit(price_quantity_file):
     output_io.seek(0)
     return output_io
 
-def calculate_difference_streamlit(forecast_file, price_quantity_file, 
-                                  online_conversion_coeff,  # 上网电量折算系数
-                                  wind_preferential_ratio,  # 风电类优发优购比例
-                                  wind_power_limit_rate,     # 风电类限电率
-                                  pv_preferential_ratio,    # 光伏类优发优购比例
-                                  pv_power_limit_rate):      # 光伏类限电率
-    """计算差值（支持动态参数配置）"""
-    # 动态计算各场站系数
-    station_coefficient = {
-        '风储一期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,   
-        '风储二期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
-        '栗溪': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
-        '峪山一期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
-        '圣境山': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
-        '襄北农光': online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate,
-        '浠水渔光': online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate
+# ---------------------- 关键改造：按场站接收参数 ----------------------
+def calculate_difference_streamlit(forecast_file, price_quantity_file, station_params):
+    """
+    按场站计算差值：station_params为字典，格式如下
+    {
+        "场站名1": {"online": 0.8, "prefer": 0.725, "limit": 0.7},
+        "场站名2": {"online": 0.8, "prefer": 0.775, "limit": 0.8},
+        ...
     }
+    """
+    # 动态计算每个场站的最终系数
+    station_coefficient = {}
+    for station_name, params in station_params.items():
+        station_coefficient[station_name] = (
+            params["online"] * params["prefer"] * params["limit"]
+        )
     
-    # 用于展示的数据字典：{场站名: 数据框}
     result_data = {}
-    
     try:
         forecast_xls = pd.ExcelFile(forecast_file, engine='openpyxl')
         price_quantity_xls = pd.ExcelFile(price_quantity_file, engine='openpyxl')
@@ -363,6 +340,8 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file,
                 continue
             if sheet_name not in price_quantity_sheet_names:
                 continue
+            if sheet_name not in station_coefficient:  # 跳过未配置参数的场站
+                continue
 
             try:
                 forecast_df = forecast_xls.parse(sheet_name)
@@ -373,8 +352,7 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file,
             if forecast_df.empty or len(forecast_df.columns) < 2:
                 continue
             
-            current_coeff = station_coefficient.get(sheet_name, 1.0)
-            
+            current_coeff = station_coefficient[sheet_name]  # 按场站取系数
             time_col = forecast_df.iloc[:, 0]
             forecast_cols = forecast_df.columns[1:]
             quantity_cols = [col for col in price_quantity_df.columns if '电量' in str(col)]
@@ -403,11 +381,9 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file,
                         if pd.notna(forecast_val) and pd.notna(quantity_val):
                             corrected_forecast = float(forecast_val) * current_coeff
                             diff_val = truncate_to_two_decimal(corrected_forecast - float(quantity_val))
-                            
                             if diff_val < 0:
                                 max_negative = -float(quantity_val)
                                 diff_val = max(diff_val, max_negative)
-                            
                             row_data.append(diff_val)
                         else:
                             row_data.append(None)
@@ -426,26 +402,44 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file,
             if '对应时段电价' in processed_df.columns:
                 processed_df['对应时段电价'] = processed_df['对应时段电价'].apply(truncate_to_two_decimal)
             
-            # 保存到结果字典
             result_data[sheet_name] = processed_df.copy()
     
     except Exception as e:
         st.error(f"计算差值出错：{str(e)}")
     
-    # 返回结果数据和系数配置（用于展示）
     return result_data, station_coefficient
 
-# ---------------------- 主页面逻辑（封装为展开式菜单） ----------------------
+# ---------------------- 主页面逻辑 ----------------------
 def main():
-    # 侧边栏主菜单：连续竞价调整（展开式）
+    # 1. 定义所有场站及默认参数（核心：统一管理场站列表和默认值）
+    DEFAULT_STATION_PARAMS = {
+        "风储一期": {"online": 0.8, "prefer": 0.725, "limit": 0.7},    # 风电默认
+        "风储二期": {"online": 0.8, "prefer": 0.725, "limit": 0.7},    # 风电默认
+        "栗溪": {"online": 0.8, "prefer": 0.725, "limit": 0.7},        # 风电默认
+        "峪山一期": {"online": 0.8, "prefer": 0.725, "limit": 0.7},    # 风电默认
+        "圣境山": {"online": 0.8, "prefer": 0.725, "limit": 0.7},      # 风电默认
+        "襄北农光": {"online": 0.8, "prefer": 0.775, "limit": 0.8},    # 光伏默认
+        "浠水渔光": {"online": 0.8, "prefer": 0.775, "limit": 0.8}     # 光伏默认
+    }
+    # 交易单元-场站映射（与默认参数场站名对应）
+    UNIT_TO_STATION = {
+        "襄阳协合峪山泉水风电": "峪山一期",
+        "荆门协合圣境山风电": "圣境山",
+        "襄阳聚合光伏": "襄北农光",
+        "三王风电": "风储一期",  # 匹配清洗后的单元名
+        "荆门协合栗溪风电": "栗溪",
+        "襄州协合三王风光储能电站风电二期": "风储二期",
+        "浠水聚合关口光伏": "浠水渔光"
+    }
+
+    # 2. 侧边栏配置
     with st.sidebar:
         st.title("📋 系统功能菜单")
         
-        # 核心：连续竞价调整 展开菜单
         with st.expander("🔧 连续竞价调整", expanded=False):
             st.header("📁 文件管理")
             
-            # 1. 批量上传月度合约文件
+            # 2.1 批量上传合约文件
             st.subheader("1. 批量上传月度合约文件")
             new_contract_files = st.file_uploader(
                 "选择合约文件（支持批量上传）",
@@ -459,7 +453,6 @@ def main():
                 key="contract_month"
             )
             
-            # 批量保存逻辑
             if st.button("保存月度文件", key="save_contract"):
                 if not new_contract_files:
                     st.warning("⚠️ 请先选择要上传的合约文件！")
@@ -475,7 +468,6 @@ def main():
                                 saved_files.append(os.path.basename(save_path))
                             except Exception as e:
                                 failed_files.append(f"{file.name} - {str(e)}")
-                        
                         if saved_files:
                             st.success(f"✅ 成功保存 {len(saved_files)} 个文件：")
                             for fname in saved_files:
@@ -485,7 +477,7 @@ def main():
                             for fname in failed_files:
                                 st.write(f"  - {fname}")
             
-            # 2. 选择已上传的月份
+            # 2.2 选择分析月份
             st.subheader("2. 选择分析月份")
             uploaded_months = get_uploaded_months()
             if uploaded_months:
@@ -495,7 +487,6 @@ def main():
                     default=uploaded_months,
                     key="selected_months"
                 )
-                # 展示每个月份的文件数量
                 st.write("📋 各月份文件统计：")
                 for month in uploaded_months:
                     file_count = len(get_files_by_month(month))
@@ -504,7 +495,7 @@ def main():
                 selected_months = []
                 st.info("暂无已上传的月度合约文件，请先上传")
             
-            # 3. 上传功率预测文件
+            # 2.3 上传功率预测文件
             st.subheader("3. 功率预测文件")
             forecast_file = st.file_uploader(
                 "上传功率预测文件（2025功率预测.xlsx）",
@@ -512,146 +503,109 @@ def main():
                 key="forecast"
             )
             
-            # 4. 系数参数配置（新增核心功能）
-            st.subheader("4. 计算系数配置")
-            st.markdown("#### 基础参数（全局）")
-            online_conversion_coeff = st.number_input(
-                "上网电量折算系数",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.8,
-                step=0.001,
-                key="online_coeff"
-            )
+            # ---------------------- 核心改造：按场站配置参数 ----------------------
+            st.subheader("4. 按场站参数配置")
+            st.markdown("💡 每个场站可独立设置「上网电量折算系数、优发优购比例、限电率」")
             
-            st.markdown("#### 风电类场站参数（风储一期/二期/栗溪/峪山一期/圣境山）")
-            wind_preferential_ratio = st.number_input(
-                "优发优购比例",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.725,
-                step=0.001,
-                key="wind_prefer"
-            )
-            wind_power_limit_rate = st.number_input(
-                "限电率",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.7,
-                step=0.001,
-                key="wind_limit"
-            )
+            # 存储用户配置的场站参数（用session_state保存，避免刷新丢失）
+            if "station_params" not in st.session_state:
+                st.session_state["station_params"] = DEFAULT_STATION_PARAMS.copy()
             
-            st.markdown("#### 光伏类场站参数（襄北农光/浠水渔光）")
-            pv_preferential_ratio = st.number_input(
-                "优发优购比例",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.775,
-                step=0.001,
-                key="pv_prefer"
-            )
-            pv_power_limit_rate = st.number_input(
-                "限电率",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.8,
-                step=0.001,
-                key="pv_limit"
-            )
+            # 为每个场站生成独立的折叠面板和参数输入框
+            for station_name in DEFAULT_STATION_PARAMS.keys():
+                with st.expander(f"📍 {station_name}", expanded=False):
+                    # 读取当前参数（默认值或用户已修改的值）
+                    current_params = st.session_state["station_params"][station_name]
+                    
+                    # 1. 上网电量折算系数（参考摘要1/3的市场化政策）
+                    online_coeff = st.number_input(
+                        "上网电量折算系数",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=current_params["online"],
+                        step=0.001,
+                        key=f"{station_name}_online"
+                    )
+                    
+                    # 2. 优发优购比例（参考摘要1宁夏优先发电计划、摘要6甘肃容量折算）
+                    prefer_ratio = st.number_input(
+                        "优发优购比例",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=current_params["prefer"],
+                        step=0.001,
+                        key=f"{station_name}_prefer"
+                    )
+                    
+                    # 3. 限电率（参考摘要4江苏/湖南限电数据，范围0-1）
+                    limit_rate = st.number_input(
+                        "限电率",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=current_params["limit"],
+                        step=0.001,
+                        key=f"{station_name}_limit"
+                    )
+                    
+                    # 更新session_state中的参数
+                    st.session_state["station_params"][station_name] = {
+                        "online": online_coeff,
+                        "prefer": prefer_ratio,
+                        "limit": limit_rate
+                    }
             
-            # 映射配置（折叠展示）
+            # 映射配置展示
             with st.expander("⚙️ 交易单元映射配置", expanded=False):
-                unit_to_station = {
-                    "襄阳协合峪山泉水风电": "峪山一期",
-                    "荆门协合圣境山风电": "圣境山",
-                    "襄阳聚合光伏": "襄北农光",
-                    "三王风电": "风储一期",  # 对应原始名「三王（协合襄北）风电」清洗后的值
-                    "荆门协合栗溪风电": "栗溪",
-                    "襄州协合三王风光储能电站风电二期": "风储二期",
-                    "浠水聚合关口光伏": "浠水渔光"
-                }
-                for k, v in unit_to_station.items():
+                for k, v in UNIT_TO_STATION.items():
                     st.write(f"• {k} → {v}")
         
-        # 其他扩展菜单（预留）
         st.divider()
         st.write("📌 其他功能模块（预留）")
     
-    # 主页面内容
+    # 3. 主页面内容
     st.title("🔧 连续竞价调整")
     st.divider()
     
-    # 获取侧边栏的变量
+    # 3.1 获取关键变量
     selected_months = st.session_state.get("selected_months", [])
     forecast_file = st.session_state.get("forecast")
-    # 获取系数参数
-    online_conversion_coeff = st.session_state.get("online_coeff", 0.8)
-    wind_preferential_ratio = st.session_state.get("wind_prefer", 0.725)
-    wind_power_limit_rate = st.session_state.get("wind_limit", 0.7)
-    pv_preferential_ratio = st.session_state.get("pv_prefer", 0.775)
-    pv_power_limit_rate = st.session_state.get("pv_limit", 0.8)
+    station_params = st.session_state.get("station_params", DEFAULT_STATION_PARAMS)
     
-    # 显示当前系数配置（方便用户核对）
-    st.subheader("⚙️ 当前计算系数配置")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### 风电类场站")
-        wind_final_coeff = online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate
-        st.write(f"上网电量折算系数：{online_conversion_coeff}")
-        st.write(f"优发优购比例：{wind_preferential_ratio}")
-        st.write(f"限电率：{wind_power_limit_rate}")
-        st.write(f"**最终系数：{wind_final_coeff:.6f}**")
-        
-        st.markdown("#### 光伏类场站")
-        pv_final_coeff = online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate
-        st.write(f"上网电量折算系数：{online_conversion_coeff}")
-        st.write(f"优发优购比例：{pv_preferential_ratio}")
-        st.write(f"限电率：{pv_power_limit_rate}")
-        st.write(f"**最终系数：{pv_final_coeff:.6f}**")
+    # 3.2 显示当前所有场站的参数汇总（方便用户核对）
+    st.subheader("📊 当前场站参数汇总")
+    # 转换为DataFrame展示
+    param_summary = []
+    for station_name, params in station_params.items():
+        final_coeff = params["online"] * params["prefer"] * params["limit"]
+        param_summary.append({
+            "场站名称": station_name,
+            "上网电量折算系数": params["online"],
+            "优发优购比例": params["prefer"],
+            "限电率": params["limit"],
+            "最终计算系数": round(final_coeff, 6)
+        })
+    param_df = pd.DataFrame(param_summary)
+    st.dataframe(param_df, use_container_width=True, hide_index=True)
     
-    # 执行按钮（禁用条件：无选中月份/无预测文件）
+    # 3.3 执行测算按钮
     run_disabled = not (selected_months and forecast_file)
     if st.button("开始测算", type="primary", disabled=run_disabled):
         with st.spinner("正在测算数据，请稍候..."):
-            # 加载选中月份的合约文件
+            # 加载合约文件
             contract_files = load_contract_files(selected_months)
-            
-            # 执行核心处理流程
-            unit_to_station = {
-                "襄阳协合峪山泉水风电": "峪山一期",
-                "荆门协合圣境山风电": "圣境山",
-                "襄阳聚合光伏": "襄北农光",
-                "三王风电": "风储一期",  # 修正后的映射key
-                "荆门协合栗溪风电": "栗溪",
-                "襄州协合三王风光储能电站风电二期": "风储二期",
-                "浠水聚合关口光伏": "浠水渔光"
-            }
-            integrated_io = generate_integrated_file_streamlit(contract_files, unit_to_station)
+            # 生成整合文件
+            integrated_io = generate_integrated_file_streamlit(contract_files, UNIT_TO_STATION)
+            # 处理预测文件和电价电量文件
             forecast_processed_io = process_power_forecast_streamlit(forecast_file)
             price_quantity_processed_io = process_price_quantity_streamlit(integrated_io)
-            
-            # 调用修改后的计算函数，传入动态参数
+            # 按场站参数计算差值（关键：传入场站参数字典）
             result_data, station_coefficient = calculate_difference_streamlit(
-                forecast_processed_io, 
+                forecast_processed_io,
                 integrated_io,
-                online_conversion_coeff,
-                wind_preferential_ratio,
-                wind_power_limit_rate,
-                pv_preferential_ratio,
-                pv_power_limit_rate
+                station_params
             )
         
-        # 展示最终系数明细
-        st.divider()
-        st.subheader("📊 各场站最终计算系数")
-        coeff_df = pd.DataFrame({
-            "场站名称": list(station_coefficient.keys()),
-            "最终系数": list(station_coefficient.values())
-        })
-        st.dataframe(coeff_df, use_container_width=True, hide_index=True)
-        
-        # 仅展示最终汇总数据
+        # 3.4 展示测算结果
         st.divider()
         st.header("📈 最终汇总数据展示")
         if result_data:
@@ -659,8 +613,8 @@ def main():
             station_tabs = st.tabs(list(result_data.keys()))
             for tab, (station_name, df) in zip(station_tabs, result_data.items()):
                 with tab:
-                    st.subheader(f"📍 {station_name}")
-                    # 数据展示（支持筛选/排序）
+                    st.subheader(f"📍 {station_name}（最终系数：{station_coefficient[station_name]:.6f}）")
+                    # 数据展示
                     st.dataframe(
                         df,
                         use_container_width=True,
@@ -670,7 +624,7 @@ def main():
                             "对应时段电价": st.column_config.NumberColumn("电价(元)", format="%.2f"),
                         }
                     )
-                    # 单场站数据下载
+                    # 下载功能
                     csv_data = df.to_csv(index=False, encoding="utf-8-sig")
                     st.download_button(
                         label=f"📥 下载{station_name}数据（CSV）",
@@ -679,11 +633,11 @@ def main():
                         mime="text/csv"
                     )
         else:
-            st.warning("暂无可展示的结果数据")
+            st.warning("暂无可展示的结果数据（可能是预测文件与合约文件场站不匹配）")
         
         st.success("✅ 测算完成！")
     
-    # 提示信息
+    # 3.5 提示信息
     if run_disabled:
         if not selected_months:
             st.warning("⚠️ 请先在侧边栏「连续竞价调整」菜单中上传并选择要分析的月度合约文件！")
