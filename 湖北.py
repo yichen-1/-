@@ -330,16 +330,22 @@ def process_price_quantity_streamlit(price_quantity_file):
     output_io.seek(0)
     return output_io
 
-def calculate_difference_streamlit(forecast_file, price_quantity_file):
-    """计算差值（仅返回数据字典）"""
+def calculate_difference_streamlit(forecast_file, price_quantity_file, 
+                                  online_conversion_coeff,  # 上网电量折算系数
+                                  wind_preferential_ratio,  # 风电类优发优购比例
+                                  wind_power_limit_rate,     # 风电类限电率
+                                  pv_preferential_ratio,    # 光伏类优发优购比例
+                                  pv_power_limit_rate):      # 光伏类限电率
+    """计算差值（支持动态参数配置）"""
+    # 动态计算各场站系数
     station_coefficient = {
-        '风储一期': 0.8*0.725*0.7 ,   
-        '风储二期': 0.8*0.725*0.7,
-        '栗溪': 0.8*0.725*0.7,
-        '峪山一期': 0.8*0.725*0.7 ,
-        '圣境山': 0.8*0.725*0.7,
-        '襄北农光': 0.8*0.775*0.8,
-        '浠水渔光': 0.8*0.775*0.8
+        '风储一期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,   
+        '风储二期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
+        '栗溪': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
+        '峪山一期': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
+        '圣境山': online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate,
+        '襄北农光': online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate,
+        '浠水渔光': online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate
     }
     
     # 用于展示的数据字典：{场站名: 数据框}
@@ -426,7 +432,8 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
     except Exception as e:
         st.error(f"计算差值出错：{str(e)}")
     
-    return result_data
+    # 返回结果数据和系数配置（用于展示）
+    return result_data, station_coefficient
 
 # ---------------------- 主页面逻辑（封装为展开式菜单） ----------------------
 def main():
@@ -505,13 +512,61 @@ def main():
                 key="forecast"
             )
             
+            # 4. 系数参数配置（新增核心功能）
+            st.subheader("4. 计算系数配置")
+            st.markdown("#### 基础参数（全局）")
+            online_conversion_coeff = st.number_input(
+                "上网电量折算系数",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.8,
+                step=0.001,
+                key="online_coeff"
+            )
+            
+            st.markdown("#### 风电类场站参数（风储一期/二期/栗溪/峪山一期/圣境山）")
+            wind_preferential_ratio = st.number_input(
+                "优发优购比例",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.725,
+                step=0.001,
+                key="wind_prefer"
+            )
+            wind_power_limit_rate = st.number_input(
+                "限电率",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.001,
+                key="wind_limit"
+            )
+            
+            st.markdown("#### 光伏类场站参数（襄北农光/浠水渔光）")
+            pv_preferential_ratio = st.number_input(
+                "优发优购比例",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.775,
+                step=0.001,
+                key="pv_prefer"
+            )
+            pv_power_limit_rate = st.number_input(
+                "限电率",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.8,
+                step=0.001,
+                key="pv_limit"
+            )
+            
             # 映射配置（折叠展示）
             with st.expander("⚙️ 交易单元映射配置", expanded=False):
                 unit_to_station = {
                     "襄阳协合峪山泉水风电": "峪山一期",
                     "荆门协合圣境山风电": "圣境山",
                     "襄阳聚合光伏": "襄北农光",
-                    "三王（协合襄北）风电": "风储一期",
+                    "三王风电": "风储一期",  # 对应原始名「三王（协合襄北）风电」清洗后的值
                     "荆门协合栗溪风电": "栗溪",
                     "襄州协合三王风光储能电站风电二期": "风储二期",
                     "浠水聚合关口光伏": "浠水渔光"
@@ -522,19 +577,38 @@ def main():
         # 其他扩展菜单（预留）
         st.divider()
         st.write("📌 其他功能模块（预留）")
-        # 可添加更多展开菜单
-        # with st.expander("📊 数据报表", expanded=False):
-        #     st.write("后续添加报表功能")
-        # with st.expander("💾 数据导出", expanded=False):
-        #     st.write("后续添加导出功能")
     
-    # 主页面内容（仅在选择连续竞价调整后显示）
+    # 主页面内容
     st.title("🔧 连续竞价调整")
     st.divider()
     
-    # 获取侧边栏的变量（通过key获取）
+    # 获取侧边栏的变量
     selected_months = st.session_state.get("selected_months", [])
     forecast_file = st.session_state.get("forecast")
+    # 获取系数参数
+    online_conversion_coeff = st.session_state.get("online_coeff", 0.8)
+    wind_preferential_ratio = st.session_state.get("wind_prefer", 0.725)
+    wind_power_limit_rate = st.session_state.get("wind_limit", 0.7)
+    pv_preferential_ratio = st.session_state.get("pv_prefer", 0.775)
+    pv_power_limit_rate = st.session_state.get("pv_limit", 0.8)
+    
+    # 显示当前系数配置（方便用户核对）
+    st.subheader("⚙️ 当前计算系数配置")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### 风电类场站")
+        wind_final_coeff = online_conversion_coeff * wind_preferential_ratio * wind_power_limit_rate
+        st.write(f"上网电量折算系数：{online_conversion_coeff}")
+        st.write(f"优发优购比例：{wind_preferential_ratio}")
+        st.write(f"限电率：{wind_power_limit_rate}")
+        st.write(f"**最终系数：{wind_final_coeff:.6f}**")
+        
+        st.markdown("#### 光伏类场站")
+        pv_final_coeff = online_conversion_coeff * pv_preferential_ratio * pv_power_limit_rate
+        st.write(f"上网电量折算系数：{online_conversion_coeff}")
+        st.write(f"优发优购比例：{pv_preferential_ratio}")
+        st.write(f"限电率：{pv_power_limit_rate}")
+        st.write(f"**最终系数：{pv_final_coeff:.6f}**")
     
     # 执行按钮（禁用条件：无选中月份/无预测文件）
     run_disabled = not (selected_months and forecast_file)
@@ -548,7 +622,7 @@ def main():
                 "襄阳协合峪山泉水风电": "峪山一期",
                 "荆门协合圣境山风电": "圣境山",
                 "襄阳聚合光伏": "襄北农光",
-                "三王（协合襄北）风电": "风储一期",
+                "三王风电": "风储一期",  # 修正后的映射key
                 "荆门协合栗溪风电": "栗溪",
                 "襄州协合三王风光储能电站风电二期": "风储二期",
                 "浠水聚合关口光伏": "浠水渔光"
@@ -556,7 +630,26 @@ def main():
             integrated_io = generate_integrated_file_streamlit(contract_files, unit_to_station)
             forecast_processed_io = process_power_forecast_streamlit(forecast_file)
             price_quantity_processed_io = process_price_quantity_streamlit(integrated_io)
-            result_data = calculate_difference_streamlit(forecast_processed_io, integrated_io)
+            
+            # 调用修改后的计算函数，传入动态参数
+            result_data, station_coefficient = calculate_difference_streamlit(
+                forecast_processed_io, 
+                integrated_io,
+                online_conversion_coeff,
+                wind_preferential_ratio,
+                wind_power_limit_rate,
+                pv_preferential_ratio,
+                pv_power_limit_rate
+            )
+        
+        # 展示最终系数明细
+        st.divider()
+        st.subheader("📊 各场站最终计算系数")
+        coeff_df = pd.DataFrame({
+            "场站名称": list(station_coefficient.keys()),
+            "最终系数": list(station_coefficient.values())
+        })
+        st.dataframe(coeff_df, use_container_width=True, hide_index=True)
         
         # 仅展示最终汇总数据
         st.divider()
