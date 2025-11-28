@@ -6,6 +6,14 @@ import re
 from datetime import datetime, date, time
 from openpyxl.styles import Alignment, PatternFill
 from io import BytesIO
+import shutil
+
+# ---------------------- 全局配置 ----------------------
+# 持久化存储目录（部署时可修改为绝对路径）
+STORAGE_DIR = os.path.join(os.path.expanduser('~'), 'power_analysis_storage')
+CONTRACT_DIR = os.path.join(STORAGE_DIR, 'monthly_contracts')
+# 自动创建存储目录
+os.makedirs(CONTRACT_DIR, exist_ok=True)
 
 # 设置页面配置
 st.set_page_config(
@@ -14,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------- 核心工具函数 ----------------------
+# ---------------------- 工具函数 ----------------------
 def clean_unit_name(unit_name):
     """清理交易单元名称：去除括号及括号内的内容"""
     if pd.isna(unit_name) or unit_name == '':
@@ -75,23 +83,60 @@ def is_valid_excel_bytes(excel_bytes):
     except:
         return False
 
-# ---------------------- 核心业务函数 ----------------------
+# ---------------------- 持久化相关函数 ----------------------
+def save_monthly_contract_file(uploaded_file, month):
+    """保存月度合约文件到本地存储"""
+    # 生成文件名：月份_原文件名
+    safe_filename = re.sub(r'[^\w\.-]', '_', uploaded_file.name)
+    save_path = os.path.join(CONTRACT_DIR, f"{month}_{safe_filename}")
+    # 保存文件
+    with open(save_path, 'wb') as f:
+        f.write(uploaded_file.getbuffer())
+    return save_path
+
+def get_uploaded_months():
+    """获取已上传的月份列表"""
+    months = set()
+    for filename in os.listdir(CONTRACT_DIR):
+        if filename.startswith(('2025-', '2024-')) and (filename.endswith('.xlsx') or filename.endswith('.xls')):
+            # 提取月份（格式：2025-11）
+            month_part = filename.split('_')[0]
+            if len(month_part) == 7 and '-' in month_part:
+                months.add(month_part)
+    return sorted(list(months))
+
+def get_files_by_month(month):
+    """获取指定月份的合约文件列表"""
+    files = []
+    for filename in os.listdir(CONTRACT_DIR):
+        if filename.startswith(f"{month}_") and (filename.endswith('.xlsx') or filename.endswith('.xls')):
+            file_path = os.path.join(CONTRACT_DIR, filename)
+            if os.path.isfile(file_path):
+                files.append(file_path)
+    return files
+
+def load_contract_files(selected_months):
+    """加载选中月份的所有合约文件"""
+    contract_files = []
+    for month in selected_months:
+        month_files = get_files_by_month(month)
+        for file_path in month_files:
+            # 转换为BytesIO供pandas读取
+            with open(file_path, 'rb') as f:
+                bytes_io = BytesIO(f.read())
+                bytes_io.name = os.path.basename(file_path)  # 保留文件名
+                contract_files.append(bytes_io)
+    return contract_files
+
+# ---------------------- 核心业务函数（无修改） ----------------------
 def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping):
-    """
-    Streamlit版本：生成电量电价整合文件
-    :param source_excel_files: Streamlit上传的文件列表（BytesIO）
-    :param unit_station_mapping: 交易单元映射字典
-    :return: 整合后的Excel字节流
-    """
-    # 初始化数据存储
+    """生成电量电价整合文件"""
     unit_data = {unit: [] for unit in unit_station_mapping.keys()}
     
-    # 处理每个上传的文件
     for file_idx, uploaded_file in enumerate(source_excel_files):
         st.write(f"🔍 处理文件：{uploaded_file.name}")
         try:
             xls = pd.ExcelFile(uploaded_file, engine='openpyxl')
-            # 遍历工作表
             for sheet in xls.sheet_names:
                 df = xls.parse(sheet)
                 if df.empty or df.shape[1] < 1:
@@ -103,7 +148,6 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
                     st.write(f"  - 工作表'{sheet}'无电量/电价列，跳过")
                     continue
                 
-                # 按交易单元拆分
                 for idx, row in df.iterrows():
                     try:
                         raw_unit = row.iloc[0]
@@ -120,7 +164,6 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
             st.error(f"处理文件 {uploaded_file.name} 出错：{str(e)}")
             continue
     
-    # 生成整合Excel
     output_io = BytesIO()
     with pd.ExcelWriter(output_io, engine='openpyxl', mode='w') as writer:
         for cleaned_unit, station_name in unit_station_mapping.items():
@@ -138,7 +181,6 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
                 merged_df['日期'] = pd.to_datetime(merged_df['日期'], errors='coerce')
                 merged_df = merged_df.sort_values(by=['日期', '时段']).reset_index(drop=True)
             
-            # 小数处理
             for col in merged_df.columns:
                 if '电量' in col or '电价' in col:
                     merged_df[col] = merged_df[col].apply(truncate_to_two_decimal)
@@ -151,7 +193,7 @@ def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping)
     return output_io
 
 def process_power_forecast_streamlit(forecast_file):
-    """Streamlit版本：处理功率预测数据"""
+    """处理功率预测数据"""
     output_io = BytesIO()
     try:
         xls = pd.ExcelFile(forecast_file, engine='openpyxl')
@@ -172,7 +214,6 @@ def process_power_forecast_streamlit(forecast_file):
                     st.write(f"工作表 '{sheet_name}' 数据结构异常，跳过")
                     continue
                 
-                # 处理时间列
                 time_column = df.iloc[:, 0]
                 data_columns = df.columns[1:]
                 times = []
@@ -197,7 +238,6 @@ def process_power_forecast_streamlit(forecast_file):
                     st.write(f"工作表 '{sheet_name}' 无有效时间数据，跳过")
                     continue
                 
-                # 处理预测数据
                 processed_data = []
                 for col in data_columns:
                     try:
@@ -223,7 +263,6 @@ def process_power_forecast_streamlit(forecast_file):
                     st.write(f"工作表 '{sheet_name}' 无有效预测数据，跳过")
                     continue
                 
-                # 构建输出数据
                 time_points = [time(hour=i) for i in range(24)]
                 columns = ['时间'] + [row[0] for row in processed_data]
                 processed_df = pd.DataFrame(columns=columns)
@@ -246,7 +285,7 @@ def process_power_forecast_streamlit(forecast_file):
     return output_io
 
 def process_price_quantity_streamlit(price_quantity_file, summary_file):
-    """Streamlit版本：处理电价电量数据"""
+    """处理电价电量数据"""
     output_io = BytesIO()
     try:
         xls_input = pd.ExcelFile(price_quantity_file, engine='openpyxl')
@@ -265,7 +304,6 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                     st.write(f"工作表 '{sheet_name}' 为空，跳过")
                     continue
                 
-                # 提取关键列
                 date_col = next((col for col in df.columns if '日期' in str(col)), None)
                 quantity_cols = [col for col in df.columns if '电量' in str(col)]
                 price_cols = [col for col in df.columns if '电价' in str(col)]
@@ -274,7 +312,6 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                     st.write(f"工作表 '{sheet_name}' 缺少日期/电量列，跳过")
                     continue
                 
-                # 解析数据
                 dates = []
                 quantity_data = []
                 price_data = []
@@ -294,7 +331,6 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                     st.write(f"工作表 '{sheet_name}' 无有效数据，跳过")
                     continue
                 
-                # 读取汇总数据
                 date_to_summary = {}
                 if xls_summary and sheet_name in xls_summary.sheet_names:
                     try:
@@ -312,7 +348,6 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
                     except Exception as e:
                         st.write(f"读取{sheet_name}汇总数据出错：{str(e)}")
                 
-                # 生成处理后数据
                 processed_data = []
                 for i, (date, quantities, prices) in enumerate(zip(dates, quantity_data, price_data)):
                     row_data = [date] + quantities + prices
@@ -342,8 +377,7 @@ def process_price_quantity_streamlit(price_quantity_file, summary_file):
     return output_io
 
 def calculate_difference_streamlit(forecast_file, price_quantity_file):
-    """Streamlit版本：计算差值"""
-    # 功率预测系数
+    """计算差值（返回字节流+数据字典，用于展示）"""
     station_coefficient = {
         '风储一期': 0.8*0.725*0.7 ,   
         '风储二期': 0.8*0.725*0.7,
@@ -355,6 +389,9 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
     }
     
     output_io = BytesIO()
+    # 用于展示的数据字典：{场站名: 数据框}
+    result_data = {}
+    
     try:
         forecast_xls = pd.ExcelFile(forecast_file, engine='openpyxl')
         price_quantity_xls = pd.ExcelFile(price_quantity_file, engine='openpyxl')
@@ -384,7 +421,6 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
                 current_coeff = station_coefficient.get(sheet_name, 1.0)
                 st.write(f"🔧 处理{sheet_name}：功率预测系数 = {round(current_coeff, 4)}")
                 
-                # 提取列
                 time_col = forecast_df.iloc[:, 0]
                 forecast_cols = forecast_df.columns[1:]
                 quantity_cols = [col for col in price_quantity_df.columns if '电量' in str(col)]
@@ -396,7 +432,6 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
                 quantity_col = quantity_cols[0]
                 price_col = price_cols[0] if price_cols else None
 
-                # 计算差值
                 processed_data = []
                 for idx, row in forecast_df.iterrows():
                     if idx >= len(price_quantity_df):
@@ -431,7 +466,6 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
                     row_data.append(current_price)
                     processed_data.append(row_data)
 
-                # 构建列名
                 new_cols = ['时间']
                 for col in forecast_cols:
                     new_cols.extend([col, f'{col} (修正后差额)'])
@@ -440,11 +474,15 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
                 processed_df = pd.DataFrame(processed_data, columns=new_cols)
                 if '对应时段电价' in processed_df.columns:
                     processed_df['对应时段电价'] = processed_df['对应时段电价'].apply(truncate_to_two_decimal)
-                processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
                 
-                # 设置格式 + 负值标黄
+                # 保存到结果字典（用于展示）
+                result_data[sheet_name] = processed_df.copy()
+                
+                processed_df.to_excel(writer, sheet_name=sheet_name, index=False)
                 worksheet = writer.sheets[sheet_name]
                 format_worksheet(worksheet)
+                
+                # 负值标黄
                 yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
                 for col_idx in range(2, len(new_cols)-1, 2):
                     col_letter = chr(65 + col_idx)
@@ -463,39 +501,63 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file):
         st.error(f"计算差值出错：{str(e)}")
     
     output_io.seek(0)
-    return output_io
+    return output_io, result_data
 
-# ---------------------- Streamlit 页面交互 ----------------------
+# ---------------------- 页面交互 ----------------------
 def main():
     st.title("📊 功率预测与电价电量分析系统")
     st.divider()
     
-    # 侧边栏：文件上传
+    # 侧边栏
     with st.sidebar:
-        st.header("📁 文件上传")
-        # 1. 功率预测文件
+        st.header("📁 文件管理")
+        
+        # 1. 上传新的月度合约文件
+        st.subheader("1. 上传月度合约文件")
+        new_contract_file = st.file_uploader(
+            "选择合约文件",
+            type=["xlsx", "xls"],
+            key="new_contract"
+        )
+        selected_month = st.text_input(
+            "文件对应月份（格式：2025-11）",
+            value=datetime.now().strftime("%Y-%m"),
+            key="contract_month"
+        )
+        
+        if st.button("保存月度文件", key="save_contract") and new_contract_file and selected_month:
+            with st.spinner("保存文件中..."):
+                save_path = save_monthly_contract_file(new_contract_file, selected_month)
+                st.success(f"✅ 文件已保存：{os.path.basename(save_path)}")
+        
+        # 2. 选择已上传的月份
+        st.subheader("2. 选择分析月份")
+        uploaded_months = get_uploaded_months()
+        if uploaded_months:
+            selected_months = st.multiselect(
+                "勾选要分析的月份",
+                options=uploaded_months,
+                default=uploaded_months,
+                key="selected_months"
+            )
+        else:
+            selected_months = []
+            st.info("暂无已上传的月度合约文件，请先上传")
+        
+        # 3. 上传其他必要文件
+        st.subheader("3. 其他文件")
         forecast_file = st.file_uploader(
-            "1. 上传功率预测文件（2025功率预测.xlsx）",
+            "功率预测文件（2025功率预测.xlsx）",
             type=["xlsx", "xls"],
             key="forecast"
         )
-        
-        # 2. 机组净合约电量文件（支持多文件上传）
-        contract_files = st.file_uploader(
-            "2. 上传机组净合约电量文件（支持多个）",
-            type=["xlsx", "xls"],
-            accept_multiple_files=True,
-            key="contract"
-        )
-        
-        # 3. 汇总文件（可选）
         summary_file = st.file_uploader(
-            "3. 上传汇总文件（汇总.xlsx，可选）",
+            "汇总文件（汇总.xlsx，可选）",
             type=["xlsx", "xls"],
             key="summary"
         )
         
-        # 映射关系（固定）
+        # 映射配置
         st.header("⚙️ 映射配置")
         unit_to_station = {
             "襄阳协合峪山泉水风电": "峪山一期",
@@ -506,15 +568,24 @@ def main():
             "襄州协合三王风光储能电站风电二期": "风储二期",
             "浠水聚合关口光伏": "浠水渔光"
         }
-        st.write("交易单元 → 场站映射：")
-        for k, v in unit_to_station.items():
-            st.write(f"• {k} → {v}")
+        with st.expander("查看交易单元映射"):
+            for k, v in unit_to_station.items():
+                st.write(f"• {k} → {v}")
     
-    # 主页面：执行流程
+    # 主页面
     st.header("🚀 执行分析流程")
-    if st.button("开始处理", type="primary", disabled=not (forecast_file and contract_files)):
+    
+    # 执行按钮（禁用条件：无选中月份/无预测文件）
+    run_disabled = not (selected_months and forecast_file)
+    if st.button("开始处理", type="primary", disabled=run_disabled):
         with st.spinner("正在处理数据，请稍候..."):
-            # 步骤1：生成电量电价整合文件
+            # 加载选中月份的合约文件
+            st.write("📥 加载选中月份的合约文件：")
+            contract_files = load_contract_files(selected_months)
+            for f in contract_files:
+                st.write(f"  - {f.name if hasattr(f, 'name') else os.path.basename(f)}")
+            
+            # 步骤1：生成整合文件
             st.subheader("步骤1：生成电量电价整合文件")
             integrated_io = generate_integrated_file_streamlit(contract_files, unit_to_station)
             st.download_button(
@@ -544,9 +615,9 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-            # 步骤4：计算差值
+            # 步骤4：计算差值（获取展示数据）
             st.subheader("步骤4：计算功率预测与电量差值")
-            difference_io = calculate_difference_streamlit(forecast_processed_io, integrated_io)
+            difference_io, result_data = calculate_difference_streamlit(forecast_processed_io, integrated_io)
             st.download_button(
                 label="📥 下载调整结果文件",
                 data=difference_io,
@@ -554,11 +625,44 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         
-        st.success("✅ 所有处理已完成！请下载对应的结果文件。")
+        # 展示最终结果
+        st.divider()
+        st.header("📈 最终汇总数据展示")
+        if result_data:
+            # 按场站分标签展示
+            station_tabs = st.tabs(list(result_data.keys()))
+            for tab, (station_name, df) in zip(station_tabs, result_data.items()):
+                with tab:
+                    st.subheader(f"📍 {station_name}")
+                    # 数据展示（支持筛选/排序）
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "时间": st.column_config.TextColumn("时段", width="small"),
+                            "对应时段电价": st.column_config.NumberColumn("电价(元)", format="%.2f"),
+                        }
+                    )
+                    # 单场站数据下载
+                    csv_data = df.to_csv(index=False, encoding="utf-8-sig")
+                    st.download_button(
+                        label=f"📥 下载{station_name}数据（CSV）",
+                        data=csv_data,
+                        file_name=f"{station_name}_调整结果.csv",
+                        mime="text/csv"
+                    )
+        else:
+            st.warning("暂无可展示的结果数据")
+        
+        st.success("✅ 所有处理已完成！")
     
     # 提示信息
-    if not (forecast_file and contract_files):
-        st.warning("⚠️ 请先上传【功率预测文件】和【机组净合约电量文件】后再执行处理！")
+    if run_disabled:
+        if not selected_months:
+            st.warning("⚠️ 请先上传并选择要分析的月度合约文件！")
+        elif not forecast_file:
+            st.warning("⚠️ 请先上传功率预测文件！")
 
 if __name__ == "__main__":
     main()
