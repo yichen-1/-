@@ -115,23 +115,26 @@ def load_contract_files(selected_months):
                 contract_files.append(bytes_io)
     return contract_files
 
-# ---------------------- 参数持久化函数 ----------------------
+# ---------------------- 参数持久化函数（核心修复） ----------------------
 def load_station_params(default_params):
-    """加载本地保存的场站参数，无则返回默认值"""
+    """加载本地保存的场站参数，强制补充缺失字段（解决KeyError）"""
     if os.path.exists(PARAM_SAVE_PATH):
         try:
             with open(PARAM_SAVE_PATH, "r", encoding="utf-8") as f:
                 saved_params = json.load(f)
-            # 兼容新增参数（如果保存的参数缺少mechanism，补充默认值）
-            for station in default_params.keys():
-                if station not in saved_params:
-                    saved_params[station] = default_params[station]
-                else:
-                    if "mechanism" not in saved_params[station]:
-                        saved_params[station]["mechanism"] = default_params[station]["mechanism"]
-            return saved_params
+            
+            # 核心修复：强制为每个场站补充所有必要字段（包括mechanism）
+            final_params = {}
+            for station_name in default_params.keys():
+                # 取默认参数模板 + 已保存的参数（已保存的覆盖默认）
+                station_default = default_params[station_name].copy()
+                station_saved = saved_params.get(station_name, {}).copy()
+                # 合并：确保所有字段都存在，缺失的用默认值补充
+                final_params[station_name] = {**station_default, **station_saved}
+            
+            return final_params
         except Exception as e:
-            st.warning(f"加载保存的参数失败，使用默认值：{e}")
+            st.warning(f"加载保存的参数失败，使用默认值：{str(e)}")
             return default_params.copy()
     return default_params.copy()
 
@@ -141,7 +144,7 @@ def save_station_params(params):
         with open(PARAM_SAVE_PATH, "w", encoding="utf-8") as f:
             json.dump(params, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        st.error(f"保存参数失败：{e}")
+        st.error(f"保存参数失败：{str(e)}")
 
 # ---------------------- 核心业务函数 ----------------------
 def generate_integrated_file_streamlit(source_excel_files, unit_station_mapping):
@@ -348,7 +351,7 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file, station_p
     # 动态计算每个场站的最终系数
     station_coefficient = {}
     for station_name, params in station_params.items():
-        # 核心公式修改：上网电量折算系数 - 优发优购比例 - 限电率 - 机制电量比例
+        # 核心公式：上网电量折算系数 - 优发优购比例 - 限电率 - 机制电量比例
         station_coefficient[station_name] = (
             params["online"] - params["prefer"] - params["limit"] - params["mechanism"]
         )
@@ -437,9 +440,9 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file, station_p
 
 # ---------------------- 主页面逻辑 ----------------------
 def main():
-    # 1. 定义所有场站及默认参数（新增mechanism：机制电量比例）
+    # 1. 定义所有场站及默认参数（包含mechanism）
     DEFAULT_STATION_PARAMS = {
-        "风储一期": {"online": 0.8, "prefer": 0.725, "limit": 0.7, "mechanism": 0.0},    # 新增mechanism默认值
+        "风储一期": {"online": 0.8, "prefer": 0.725, "limit": 0.7, "mechanism": 0.0},
         "风储二期": {"online": 0.8, "prefer": 0.725, "limit": 0.7, "mechanism": 0.0},
         "栗溪": {"online": 0.8, "prefer": 0.725, "limit": 0.7, "mechanism": 0.0},
         "峪山一期": {"online": 0.8, "prefer": 0.725, "limit": 0.7, "mechanism": 0.0},
@@ -458,7 +461,7 @@ def main():
         "浠水聚合关口光伏": "浠水渔光"
     }
 
-    # 2. 加载保存的参数（首次启动用默认值）
+    # 2. 加载保存的参数（核心修复：自动补充缺失字段）
     if "station_params" not in st.session_state:
         st.session_state["station_params"] = load_station_params(DEFAULT_STATION_PARAMS)
 
@@ -533,22 +536,22 @@ def main():
                 key="forecast"
             )
             
-            # 3.4 按场站参数配置（新增机制电量比例）
+            # 3.4 按场站参数配置（新增机制电量比例，增加容错）
             st.subheader("4. 按场站参数配置")
             st.markdown("💡 每个场站可独立设置「上网电量折算系数、优发优购比例、限电率、机制电量比例」")
             
             # 为每个场站生成独立的折叠面板和参数输入框
             for station_name in DEFAULT_STATION_PARAMS.keys():
                 with st.expander(f"📍 {station_name}", expanded=False):
-                    # 读取当前参数
-                    current_params = st.session_state["station_params"][station_name]
+                    # 读取当前参数（确保字段完整）
+                    current_params = st.session_state["station_params"].get(station_name, DEFAULT_STATION_PARAMS[station_name])
                     
                     # 1. 上网电量折算系数
                     online_coeff = st.number_input(
                         "上网电量折算系数",
                         min_value=0.0,
                         max_value=1.0,
-                        value=current_params["online"],
+                        value=current_params.get("online", 0.8),  # 容错：字段缺失时用默认值
                         step=0.001,
                         key=f"{station_name}_online"
                     )
@@ -558,7 +561,7 @@ def main():
                         "优发优购比例",
                         min_value=0.0,
                         max_value=1.0,
-                        value=current_params["prefer"],
+                        value=current_params.get("prefer", 0.725),  # 容错
                         step=0.001,
                         key=f"{station_name}_prefer"
                     )
@@ -568,27 +571,27 @@ def main():
                         "限电率",
                         min_value=0.0,
                         max_value=1.0,
-                        value=current_params["limit"],
+                        value=current_params.get("limit", 0.7),  # 容错
                         step=0.001,
                         key=f"{station_name}_limit"
                     )
                     
-                    # 4. 新增：机制电量比例
+                    # 4. 机制电量比例（核心容错：字段缺失时用0.0）
                     mechanism_ratio = st.number_input(
                         "机制电量比例",
                         min_value=0.0,
                         max_value=1.0,
-                        value=current_params["mechanism"],
+                        value=current_params.get("mechanism", 0.0),  # 关键容错
                         step=0.001,
                         key=f"{station_name}_mechanism"
                     )
                     
-                    # 更新session_state中的参数
+                    # 更新session_state中的参数（确保字段完整）
                     st.session_state["station_params"][station_name] = {
                         "online": online_coeff,
                         "prefer": prefer_ratio,
                         "limit": limit_rate,
-                        "mechanism": mechanism_ratio  # 新增机制电量比例
+                        "mechanism": mechanism_ratio
                     }
                     # 实时保存参数到本地
                     save_station_params(st.session_state["station_params"])
@@ -615,13 +618,13 @@ def main():
     param_summary = []
     for station_name, params in station_params.items():
         # 最终系数 = 上网电量折算系数 - 优发优购比例 - 限电率 - 机制电量比例
-        final_coeff = params["online"] - params["prefer"] - params["limit"] - params["mechanism"]
+        final_coeff = params.get("online", 0.8) - params.get("prefer", 0.0) - params.get("limit", 0.0) - params.get("mechanism", 0.0)
         param_summary.append({
             "场站名称": station_name,
-            "上网电量折算系数": params["online"],
-            "优发优购比例": params["prefer"],
-            "限电率": params["limit"],
-            "机制电量比例": params["mechanism"],  # 新增列
+            "上网电量折算系数": params.get("online", 0.8),
+            "优发优购比例": params.get("prefer", 0.0),
+            "限电率": params.get("limit", 0.0),
+            "机制电量比例": params.get("mechanism", 0.0),
             "最终计算系数": round(final_coeff, 6)
         })
     param_df = pd.DataFrame(param_summary)
@@ -653,7 +656,7 @@ def main():
             station_tabs = st.tabs(list(result_data.keys()))
             for tab, (station_name, df) in zip(station_tabs, result_data.items()):
                 with tab:
-                    st.subheader(f"📍 {station_name}（最终系数：{station_coefficient[station_name]:.6f}）")
+                    st.subheader(f"📍 {station_name}（最终系数：{station_coefficient.get(station_name, 0.0):.6f}）")
                     # 数据展示
                     st.dataframe(
                         df,
