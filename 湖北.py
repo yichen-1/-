@@ -512,11 +512,13 @@ def main():
     with st.sidebar:
         st.header("📁 文件管理")
         
-        # 1. 上传新的月度合约文件
-        st.subheader("1. 上传月度合约文件")
-        new_contract_file = st.file_uploader(
-            "选择合约文件",
+        # 1. 批量上传月度合约文件
+        st.subheader("1. 批量上传月度合约文件")
+        # 核心修改：支持多文件上传
+        new_contract_files = st.file_uploader(
+            "选择合约文件（支持批量上传）",
             type=["xlsx", "xls"],
+            accept_multiple_files=True,  # 开启批量上传
             key="new_contract"
         )
         selected_month = st.text_input(
@@ -525,10 +527,33 @@ def main():
             key="contract_month"
         )
         
-        if st.button("保存月度文件", key="save_contract") and new_contract_file and selected_month:
-            with st.spinner("保存文件中..."):
-                save_path = save_monthly_contract_file(new_contract_file, selected_month)
-                st.success(f"✅ 文件已保存：{os.path.basename(save_path)}")
+        # 批量保存逻辑
+        if st.button("保存月度文件", key="save_contract"):
+            if not new_contract_files:
+                st.warning("⚠️ 请先选择要上传的合约文件！")
+            elif not selected_month:
+                st.warning("⚠️ 请输入对应的月份（格式：2025-11）！")
+            else:
+                with st.spinner("批量保存文件中..."):
+                    saved_files = []
+                    failed_files = []
+                    # 循环处理每个上传的文件
+                    for file in new_contract_files:
+                        try:
+                            save_path = save_monthly_contract_file(file, selected_month)
+                            saved_files.append(os.path.basename(save_path))
+                        except Exception as e:
+                            failed_files.append(f"{file.name} - {str(e)}")
+                    
+                    # 展示保存结果
+                    if saved_files:
+                        st.success(f"✅ 成功保存 {len(saved_files)} 个文件：")
+                        for fname in saved_files:
+                            st.write(f"  - {fname}")
+                    if failed_files:
+                        st.error(f"❌ 保存失败 {len(failed_files)} 个文件：")
+                        for fname in failed_files:
+                            st.write(f"  - {fname}")
         
         # 2. 选择已上传的月份
         st.subheader("2. 选择分析月份")
@@ -540,6 +565,11 @@ def main():
                 default=uploaded_months,
                 key="selected_months"
             )
+            # 展示每个月份的文件数量
+            st.write("📋 各月份文件统计：")
+            for month in uploaded_months:
+                file_count = len(get_files_by_month(month))
+                st.write(f"  • {month}：{file_count} 个文件")
         else:
             selected_months = []
             st.info("暂无已上传的月度合约文件，请先上传")
