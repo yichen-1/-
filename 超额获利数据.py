@@ -197,7 +197,7 @@ def calculate_24h_generated(merged_df):
         generated_data.append(row)
     
     generated_df = pd.DataFrame(generated_data).fillna(0)
-    # 计算各场站月度实发总量（存入全局变量用于关联）
+    # 修正点：先声明global，再操作变量
     global generated_data 
     generated_data = {}
     for station in stations:
