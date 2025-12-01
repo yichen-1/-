@@ -15,9 +15,9 @@ st.set_page_config(
 
 # -------------------------- 全局变量初始化（用于数据关联） --------------------------
 # 存储实发数据（key：场站名，value：月度实发总量MWh）
-generated_data = {}
+global_generated_data = {}
 # 存储中长期持仓数据（key：场站名，value：月度净持有电量）
-hold_data = {}
+global_hold_data = {}
 # 存储已提取的场站列表
 extracted_stations = []
 
@@ -132,7 +132,7 @@ def extract_generated_data(uploaded_file, time_idx, power_idx, skip_r, conv):
         df = df.dropna(subset=["时间", "功率(kW)"])
         if df.empty:
             st.warning(f"⚠️ 实发文件[{file_name}]无有效数据")
-            return pd.DataFrame(), file_name
+            return pd.DataFrame(), file_name, ""
         
         df = df.sort_values("时间").reset_index(drop=True)
         station_name = extract_station_name(file_name)
@@ -169,15 +169,16 @@ def extract_hold_data(uploaded_file, hold_col_idx, skip_r, target_station):
         total_hold = round(df["净持有电量"].sum(), 2)
         
         st.success(f"✅ 持仓文件[{file_name}]处理完成：")
-        st.info(f"关联场站：{target_station} | 当月总净持有电量：{total_hold}")
+        st.info(f"关联场站：{target_station} | 当月总净持有电量：{total_hold} MWh")
         return total_hold, target_station
     except Exception as e:
         st.error(f"处理持仓文件[{file_name}]失败：{str(e)}")
         return 0.0, target_station
 
-# 3. 24时段实发汇总函数（保留原有逻辑）
+# 3. 24时段实发汇总函数（修正global声明+变量命名冲突）
 @st.cache_data(show_spinner="计算24时段实发汇总中...")
 def calculate_24h_generated(merged_df):
+    """计算24时段实发汇总，修正全局变量命名冲突"""
     df = merged_df.copy()
     time_diff = df["时间"].diff().dropna()
     avg_interval_min = time_diff.dt.total_seconds().mean() / 60
@@ -187,25 +188,31 @@ def calculate_24h_generated(merged_df):
     df["小时时段"] = df["时间"].dt.hour
     stations = [col for col in df.columns if col not in ["时间", "小时时段"]]
     
-    generated_data = []
+    # 修正：局部变量改名，避免和全局变量重名
+    generated_rows = []
     for hour in range(24):
         hour_df = df[df["小时时段"] == hour].copy()
         row = {"小时时段": f"{hour:02d}:00"}
         for station in stations:
             total_gen = (hour_df[station] * interval_h).sum()
             row[station] = round(total_gen, 2)
-        generated_data.append(row)
+        generated_rows.append(row)
     
-    generated_df = pd.DataFrame(generated_data).fillna(0)
-    # 修正点：先声明global，再操作变量
-    global generated_data 
-    generated_data = {}
+    generated_df = pd.DataFrame(generated_rows).fillna(0)
+    
+    # 修正：先声明全局变量，再赋值
+    global global_generated_data
+    global_generated_data = {}
+    # 计算各场站月度实发总量并更新全局变量
+    total_row = {"小时时段": "月度实发总量"}
     for station in stations:
         total_month_gen = round(generated_df[station].sum(), 2)
-        generated_data[station] = total_month_gen
-        generated_df.loc[len(generated_df), station] = total_month_gen
+        global_generated_data[station] = total_month_gen
+        total_row[station] = total_month_gen
     
-    generated_df["小时时段"] = generated_df["小时时段"].fillna("月度实发总量")
+    # 添加月度总计行
+    generated_df = pd.concat([generated_df, pd.DataFrame([total_row])], ignore_index=True)
+    
     return generated_df, interval_h, stations
 
 # -------------------------- 批量处理函数 --------------------------
@@ -275,21 +282,25 @@ def show_related_data():
     st.subheader("🔗 场站实发与中长期持仓关联结果")
     
     # 检查是否有实发和持仓数据
-    if not generated_data:
+    if not global_generated_data:
         st.warning("⚠️ 暂未提取到场站实发数据，请先处理「场站实发配置」中的文件")
         return
-    if not hold_data:
+    if not global_hold_data:
         st.warning("⚠️ 暂未上传场站持仓数据，请先处理「中长期持仓配置」中的文件")
         return
     
     # 生成关联结果表格
     related_data = []
-    for station in generated_data.keys():
+    for station in global_generated_data.keys():
+        gen_total = global_generated_data.get(station, 0)
+        hold_total = global_hold_data.get(station, 0)
+        # 避免除以0
+        coverage = round((hold_total / gen_total * 100) if gen_total > 0 else 0, 2)
         related_data.append({
             "场站名": station,
-            "当月实发总量（MWh）": generated_data.get(station, 0),
-            "当月中长期持仓（净持有电量）": hold_data.get(station, 0),
-            "持仓覆盖度（持仓/实发）": f"{round((hold_data.get(station, 0)/generated_data.get(station, 1))*100, 2)}%"
+            "当月实发总量（MWh）": gen_total,
+            "当月中长期持仓（净持有电量，MWh）": hold_total,
+            "持仓覆盖度": f"{coverage}%"
         })
     
     related_df = pd.DataFrame(related_data)
@@ -299,7 +310,7 @@ def show_related_data():
     fig = px.bar(
         related_df,
         x="场站名",
-        y=["当月实发总量（MWh）", "当月中长期持仓（净持有电量）"],
+        y=["当月实发总量（MWh）", "当月中长期持仓（净持有电量，MWh）"],
         barmode="group",
         title="各场站实发总量与中长期持仓对比",
         template="plotly_white"
@@ -388,15 +399,15 @@ if uploaded_generated_files:
 if uploaded_hold_files and selected_station.strip():
     if st.button("📦 开始处理中长期持仓数据", type="primary", key="process_hold"):
         with st.spinner("处理持仓文件并关联场站..."):
-            global hold_data 
+            global global_hold_data 
             for file in uploaded_hold_files:
                 total_hold, station = extract_hold_data(file, hold_col_idx, hold_skip_rows, selected_station.strip())
                 if station and total_hold > 0:
-                    hold_data[station] = total_hold  # 存入全局变量，key为场站名
+                    global_hold_data[station] = total_hold  # 存入全局变量，key为场站名
             st.success("✅ 中长期持仓数据处理完成！已关联到场站")
 
 # 3. 展示关联结果（无论先处理实发还是持仓，都能触发）
-if generated_data or hold_data:
+if global_generated_data or global_hold_data:
     show_related_data()
 
 # 4. 无数据时的提示
@@ -426,5 +437,5 @@ st.sidebar.markdown("""
 - 实发与持仓关联的核心：**场站名必须完全一致**
 - 实发总量单位：MWh（兆瓦时）
 - 持仓数据：取D列（净持有电量）当月总和
-- 持仓覆盖度=（持仓/实发）×100%
+- 持仓覆盖度=（持仓/实发）×100%（避免除以0错误）
 """)
