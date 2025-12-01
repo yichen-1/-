@@ -34,15 +34,17 @@ skip_rows = st.sidebar.number_input("跳过表头行数", value=1, min_value=0)
 # 处理光伏场站名单为列表
 pv_stations_list = [s.strip() for s in pv_stations.split(",") if s.strip()]
 
-# -------------------------- 核心工具函数 --------------------------
+# -------------------------- 核心工具函数（优化版） --------------------------
 @st.cache_data(show_spinner="清洗功率数据中...")
 def clean_power_data(value):
-    """清洗功率列数据：提取数值，过滤文本/特殊字符"""
+    """优化：放宽过滤条件，保留含数字的功率值"""
     if pd.isna(value):
         return None
     value_str = str(value).strip()
-    if re.match(r'^[^\d.]+$', value_str):
+    # 仅过滤完全无数字的文本
+    if not re.search(r'\d', value_str):
         return None
+    # 提取数值（兼容特殊格式）
     num_match = re.search(r'(\d+\.?\d*)', value_str)
     if num_match:
         try:
@@ -59,30 +61,53 @@ def extract_station_name(file_name):
 
 @st.cache_data(show_spinner="提取Excel数据中...")
 def extract_excel_data(uploaded_file, time_idx, power_idx, skip_r, conv):
-    """提取单个上传Excel文件的数据（适配BytesIO流）"""
+    """提取单个上传Excel文件的数据（增加调试信息+强制正序）"""
     try:
         # 识别文件格式，选择引擎
         file_name = uploaded_file.name
         suffix = file_name.split(".")[-1].lower()
         engine = "openpyxl" if suffix in ["xlsx", "xlsm"] else "xlrd"
         
-        # 读取上传的文件流
+        # 读取上传的文件流（显式指定读取所有行）
         df = pd.read_excel(
             BytesIO(uploaded_file.getvalue()),  # 转换为字节流
             header=None,
             usecols=[time_idx, power_idx],
             skiprows=skip_r,
-            engine=engine
+            engine=engine,
+            nrows=None  # 确保读取所有行
         )
         
-        # 数据清洗
-        df.columns = ["时间", "功率(kW)"]
-        df["功率(kW)"] = df["功率(kW)"].apply(clean_power_data)
-        df["时间"] = pd.to_datetime(df["时间"], errors="coerce")
+        # 数据清洗（保留原始值用于调试）
+        df.columns = ["时间_原始", "功率_原始"]
+        df["功率(kW)"] = df["功率_原始"].apply(clean_power_data)
+        # 时间解析（保留失败记录）
+        df["时间"] = pd.to_datetime(df["时间_原始"], errors="coerce")
+        
+        # 调试：显示解析失败的记录
+        time_fail = df[df["时间"].isna()]
+        power_fail = df[df["功率(kW)"].isna() & df["时间"].notna()]
+        if not time_fail.empty:
+            st.warning(f"⚠️ {file_name} 时间解析失败{len(time_fail)}条（前5条示例）：")
+            st.dataframe(time_fail[["时间_原始", "功率_原始"]].head(5), use_container_width=True)
+        if not power_fail.empty:
+            st.warning(f"⚠️ {file_name} 功率清洗失败{len(power_fail)}条（前5条示例）：")
+            st.dataframe(power_fail[["时间", "功率_原始"]].head(5), use_container_width=True)
+        
+        # 过滤无效数据
         df = df.dropna(subset=["时间", "功率(kW)"])
         
         if df.empty:
+            st.warning(f"⚠️ {file_name} 无有效数据")
             return pd.DataFrame(), file_name
+        
+        # 新增：单文件数据强制按时间正序排列
+        df = df.sort_values("时间").reset_index(drop=True)
+        
+        # 调试：显示该文件提取的时间范围
+        min_time = df["时间"].min()
+        max_time = df["时间"].max()
+        st.info(f"📄 {file_name} 有效数据范围：{min_time.strftime('%Y-%m-%d %H:%M')} ~ {max_time.strftime('%Y-%m-%d %H:%M')}（共{len(df)}条）")
         
         # 提取场站名并转换单位
         station_name = extract_station_name(file_name)
@@ -204,20 +229,32 @@ if uploaded_files:
             result_df, station_dfs = batch_extract_data(uploaded_files)
             
             if result_df is not None and not result_df.empty:
-                # 数据预览
+                # 数据预览（优化版）
                 st.markdown("---")
                 st.subheader("📈 数据预览")
                 
-                # 切换预览标签
+                # 新增：醒目显示完整时间范围
+                min_time = result_df["时间"].min().strftime("%Y-%m-%d %H:%M")
+                max_time = result_df["时间"].max().strftime("%Y-%m-%d %H:%M")
+                st.success(f"✅ 完整数据时间范围：{min_time} ~ {max_time}（共{len(result_df)}条记录）")
+                
+                # 切换预览标签（显示首尾20条）
                 tab1, tab2 = st.tabs(["全部数据", "光伏场站数据"])
                 with tab1:
-                    st.dataframe(result_df.head(50), use_container_width=True)
+                    st.markdown("**正序排列（前20条：早期数据）**")
+                    st.dataframe(result_df.head(20), use_container_width=True)
+                    st.markdown("**正序排列（后20条：后期数据）**")
+                    st.dataframe(result_df.tail(20), use_container_width=True)
                 with tab2:
                     # 筛选光伏场站数据
                     pv_cols = [col for col in result_df.columns if col in pv_stations_list]
                     if pv_cols:
                         pv_df = result_df[["时间"] + pv_cols].dropna(subset=pv_cols, how="all")
-                        st.dataframe(pv_df.head(50), use_container_width=True)
+                        pv_df = pv_df.sort_values("时间").reset_index(drop=True)
+                        st.markdown("**光伏数据正序（前20条：早期数据）**")
+                        st.dataframe(pv_df.head(20), use_container_width=True)
+                        st.markdown("**光伏数据正序（后20条：后期数据）**")
+                        st.dataframe(pv_df.tail(20), use_container_width=True)
                     else:
                         st.info("暂无光伏场站数据")
                 
@@ -255,4 +292,5 @@ st.sidebar.markdown("""
 - 自动区分光伏/风电场站列索引
 - 数据按时间对齐，NaN表示无数据
 - 下载文件名自动带年月，方便归档
+- 预览显示首尾20条，可直观查看数据完整范围
 """)
