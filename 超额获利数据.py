@@ -35,7 +35,7 @@ if "core_data" not in st.session_state:
         },
         "price": {      # 电价数据
             "24h": pd.DataFrame(),       # 24时段电价数据
-            "excess_profit": pd.DataFrame()  # 超额获利回收计算结果
+            "excess_profit": pd.DataFrame()  # 超额获利回收计算结果（仅>0）
         }
     }
 
@@ -245,11 +245,11 @@ class DataProcessor:
     @staticmethod
     def calculate_excess_profit(generated_24h_df, hold_total_dict, price_24h_df):
         """
-        计算超额获利回收（按风电/光伏差异化计算）
+        计算超额获利回收（按风电/光伏差异化计算，仅保留>0的记录）
         :param generated_24h_df: 24时段实发汇总
         :param hold_total_dict: 月度总持仓（场站名: 总量）
         :param price_24h_df: 24时段电价数据
-        :return: 超额获利回收明细DF
+        :return: 超额获利回收明细DF（仅>0）
         """
         # 前置检查
         if generated_24h_df.empty:
@@ -315,8 +315,10 @@ class DataProcessor:
                     "超额获利回收(元)": round(excess_profit, 2)
                 })
 
-        # 转换为DataFrame
+        # 转换为DataFrame + 仅保留超额获利>0的记录
         result_df = pd.DataFrame(result_rows)
+        result_df = result_df[result_df["超额获利回收(元)"] > 0].reset_index(drop=True)
+
         return result_df
 
 # -------------------------- 6. 侧边栏：模块化配置（核心收纳优化） --------------------------
@@ -547,7 +549,7 @@ if hold_core["total"]:
 st.markdown("---")
 
 # ======================== 7.3 模块3：电价+超额获利计算 ========================
-st.subheader("💰 模块3：月度电价处理与超额获利回收计算")
+st.subheader("💰 模块3：月度电价处理与超额获利回收计算（仅统计>0部分）")
 if uploaded_price_file:
     if st.button("🚀 执行电价提取与超额获利计算", type="primary", key="exec_price"):
         with st.spinner("正在处理电价文件并计算超额获利..."):
@@ -566,7 +568,7 @@ if uploaded_price_file:
                 st.error("❌ 未提取到有效电价数据")
                 st.stop()
 
-            # 2. 计算超额获利回收
+            # 2. 计算超额获利回收（仅保留>0）
             excess_profit_df = processor.calculate_excess_profit(
                 generated_24h_df=gen_core["24h"],
                 hold_total_dict=hold_core["total"],
@@ -578,6 +580,8 @@ if uploaded_price_file:
             st.session_state.core_data["price"]["excess_profit"] = excess_profit_df
 
             st.success("✅ 电价处理与超额获利计算完成！")
+            if excess_profit_df.empty:
+                st.warning("⚠️ 无超额获利>0的记录")
 
 # 电价结果展示
 price_core = st.session_state.core_data["price"]
@@ -588,22 +592,22 @@ if not price_core["24h"].empty:
 # 超额获利结果展示
 if not price_core["excess_profit"].empty:
     excess_df = price_core["excess_profit"]
-    with st.expander("📊 查看超额获利回收明细（24时段×场站）", expanded=True):
+    with st.expander("📊 查看超额获利回收明细（24时段×场站，仅显示>0部分）", expanded=True):
         st.dataframe(excess_df, use_container_width=True)
 
     # 超额获利汇总统计
-    st.subheader("📊 超额获利回收汇总")
+    st.subheader("📊 超额获利回收汇总（仅统计>0部分）")
     col1, col2 = st.columns(2)
     with col1:
         # 按场站汇总
         station_excess = excess_df.groupby("场站名")["超额获利回收(元)"].sum().round(2).reset_index()
-        station_excess.columns = ["场站名", "月度超额获利回收(元)"]
+        station_excess.columns = ["场站名", "月度超额获利回收(元)（仅正数）"]
         st.subheader("按场站汇总")
         st.dataframe(station_excess, use_container_width=True)
     with col2:
         # 按类型汇总
         type_excess = excess_df.groupby("场站类型")["超额获利回收(元)"].sum().round(2).reset_index()
-        type_excess.columns = ["场站类型", "月度超额获利回收(元)"]
+        type_excess.columns = ["场站类型", "月度超额获利回收(元)（仅正数）"]
         st.subheader("按类型汇总")
         st.dataframe(type_excess, use_container_width=True)
 
@@ -622,14 +626,16 @@ if not price_core["excess_profit"].empty:
         )
     with col2:
         # 超额获利明细下载
-        excess_excel = to_excel(excess_df, "超额获利回收明细")
+        excess_excel = to_excel(excess_df, "超额获利回收明细（仅正数）")
         st.download_button(
             "下载超额获利回收明细",
             data=excess_excel,
-            file_name=f"超额获利回收明细_{current_month}.xlsx",
+            file_name=f"超额获利回收明细_仅正数_{current_month}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_excess"
         )
+elif uploaded_price_file and price_core["excess_profit"].empty:
+    st.warning("⚠️ 计算完成，但无超额获利>0的记录")
 
 # ======================== 7.4 全局功能：数据重置 ========================
 st.markdown("---")
@@ -648,7 +654,7 @@ st.sidebar.markdown("### 📝 使用流程指引")
 st.sidebar.markdown("""
 1. **模块1（实发）**：上传文件→确认配置→执行提取→生成24时段汇总
 2. **模块2（持仓）**：上传文件→选择关联场站→执行提取→持仓均分至场站
-3. **模块3（电价）**：上传文件→执行计算→生成超额获利明细+汇总
+3. **模块3（电价）**：上传文件→执行计算→生成超额获利明细+汇总（仅>0）
 
 ⚠️ 执行顺序：模块1 → 模块2 → 模块3（前置模块未完成无法执行后续）
 """)
@@ -659,5 +665,6 @@ st.sidebar.markdown("""
 - 超额获利公式：
   - 价差>0：(实发×0.8 - 持仓×0.7) × 价差
   - 价差<0：(实发×0.8 - 持仓×1.3) × 价差
+- 最终统计：仅保留超额获利>0的记录，≤0部分不展示/不汇总
 - 所有数据存储在会话中，刷新页面不丢失（关闭页面重置）
 """)
