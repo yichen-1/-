@@ -13,13 +13,42 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# -------------------------- 2. 全局常量与映射（固定配置） --------------------------
+# -------------------------- 2. 全局常量与映射 --------------------------
 STATION_TYPE_MAP = {
     "风电": ["荆门栗溪", "荆门圣境山", "襄北风储二期", "襄北风储一期", "襄州峪山一期"],
     "光伏": ["襄北农光", "浠水渔光"]
 }
 
-# -------------------------- 3. 会话状态初始化 --------------------------
+# -------------------------- 3. 核心工具函数（新增：列名去重） --------------------------
+def deduplicate_columns(df):
+    """强制去重列名（添加序号后缀）"""
+    cols = df.columns.tolist()
+    new_cols = []
+    col_count = {}
+    
+    for col in cols:
+        col_str = str(col).strip()
+        if col_str not in col_count:
+            col_count[col_str] = 0
+            new_cols.append(col_str)
+        else:
+            col_count[col_str] += 1
+            new_cols.append(f"{col_str}_{col_count[col_str]}")
+    
+    df.columns = new_cols
+    return df
+
+def to_excel(df, sheet_name="数据"):
+    if df.empty:
+        st.warning("⚠️ 数据为空，无法生成Excel文件")
+        return BytesIO()
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output
+
+# -------------------------- 4. 会话状态初始化 --------------------------
 if "core_data" not in st.session_state:
     st.session_state.core_data = {
         "generated": {"raw": pd.DataFrame(), "24h": pd.DataFrame(), "total": {}},
@@ -36,17 +65,6 @@ if "module_config" not in st.session_state:
         "hold": {"hold_col": 3, "skip_rows": 1},
         "price": {"spot_col": 1, "wind_contract_col": 2, "pv_contract_col": 3, "skip_rows": 1}
     }
-
-# -------------------------- 4. 辅助函数 --------------------------
-def to_excel(df, sheet_name="数据"):
-    if df.empty:
-        st.warning("⚠️ 数据为空，无法生成Excel文件")
-        return BytesIO()
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    output.seek(0)
-    return output
 
 # -------------------------- 5. 核心数据处理类 --------------------------
 class DataProcessor:
@@ -72,7 +90,7 @@ class DataProcessor:
             file_suffix = file.name.split(".")[-1].lower()
             engine = "openpyxl" if file_suffix in ["xlsx", "xlsm"] else "xlrd"
             
-            # 读取基础数据
+            # 1. 读取数据（仅必要列）
             df = pd.read_excel(
                 BytesIO(file.getvalue()),
                 header=None,
@@ -81,21 +99,27 @@ class DataProcessor:
                 engine=engine,
                 nrows=None
             )
+            
+            # 2. 基础清洗（先去重列名）
+            df = deduplicate_columns(df)
+            df = df.iloc[:, :2]  # 确保只保留前两列
             df.columns = ["时间", "功率(kW)"]
 
-            # 严格清洗
+            # 3. 严格数据清洗
             df["功率(kW)"] = df["功率(kW)"].apply(DataProcessor.clean_power_value)
             df["时间"] = pd.to_datetime(df["时间"], errors="coerce")
             df = df.dropna(subset=["时间", "功率(kW)"]).sort_values("时间").reset_index(drop=True)
 
-            # 提取场站名（确保唯一）
+            # 4. 生成唯一场站名
             station_name = file.name.split(".")[0].split("-")[0].strip()
-            # 避免重复列名
-            if station_name in df.columns:
-                station_name = f"{station_name}_{file.name[:8]}"  # 加文件前缀区分
+            station_name = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '_', station_name)  # 清理特殊字符
             df[station_name] = df["功率(kW)"] / config["conv"]
 
-            return df[["时间", station_name]], station_name
+            # 5. 最终整理（仅保留时间+场站列）
+            df_result = df[["时间", station_name]].copy()
+            df_result = deduplicate_columns(df_result)  # 二次确保列名唯一
+            
+            return df_result, station_name
         except Exception as e:
             st.error(f"❌ 实发文件[{file.name}]处理失败：{str(e)}")
             return pd.DataFrame(columns=["时间"]), ""
@@ -114,6 +138,7 @@ class DataProcessor:
                 engine=engine,
                 nrows=None
             )
+            df = deduplicate_columns(df)
             df.columns = ["净持有电量"]
             df["净持有电量"] = pd.to_numeric(df["净持有电量"], errors="coerce").fillna(0)
             total_hold = round(df["净持有电量"].sum(), 2)
@@ -136,11 +161,16 @@ class DataProcessor:
                 engine=engine,
                 nrows=24
             )
+            df = deduplicate_columns(df)
+            df = df.iloc[:, :4]  # 确保只保留前4列
             df.columns = ["时段", "现货均价(元/MWh)", "风电合约均价(元/MWh)", "光伏合约均价(元/MWh)"]
+            
+            # 清洗
             df["时段"] = [f"{i:02d}:00" for i in range(24)]
             price_cols = ["现货均价(元/MWh)", "风电合约均价(元/MWh)", "光伏合约均价(元/MWh)"]
             for col in price_cols:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            
             return df
         except Exception as e:
             st.error(f"❌ 电价文件[{file.name}]处理失败：{str(e)}")
@@ -152,25 +182,32 @@ class DataProcessor:
             st.warning("⚠️ 实发原始数据为空，无法计算24时段汇总")
             return pd.DataFrame(), {}
 
+        # 确保列名唯一
+        merged_raw_df = deduplicate_columns(merged_raw_df)
+        
+        # 计算时间间隔
         time_diff = merged_raw_df["时间"].diff().dropna()
         avg_interval_h = time_diff.dt.total_seconds().mean() / 3600
         avg_interval_h = avg_interval_h if avg_interval_h > 0 else 1/4
 
+        # 提取时段
         merged_raw_df["时段"] = merged_raw_df["时间"].dt.hour.apply(lambda x: f"{x:02d}:00")
         station_cols = [col for col in merged_raw_df.columns if col not in ["时间", "时段"]]
         
-        # 安全分组汇总
+        # 安全汇总
         try:
             generated_24h_df = merged_raw_df.groupby("时段")[station_cols].apply(
                 lambda x: (x * avg_interval_h).sum()
             ).round(2).reset_index()
+            generated_24h_df = deduplicate_columns(generated_24h_df)
         except Exception as e:
             st.error(f"❌ 24时段汇总失败：{str(e)}")
             return pd.DataFrame(), {}
 
+        # 月度总实发
         monthly_total = {
             station: round(generated_24h_df[station].sum(), 2)
-            for station in station_cols
+            for station in station_cols if station in generated_24h_df.columns
         }
 
         return generated_24h_df, monthly_total
@@ -181,7 +218,13 @@ class DataProcessor:
             st.warning("⚠️ 实发/持仓/电价数据不完整，无法计算超额获利")
             return pd.DataFrame()
 
+        # 确保列名唯一
+        generated_24h_df = deduplicate_columns(generated_24h_df)
+        price_24h_df = deduplicate_columns(price_24h_df)
+        
+        # 合并数据
         merged_df = pd.merge(generated_24h_df, price_24h_df, on="时段", how="inner")
+        merged_df = deduplicate_columns(merged_df)
         if merged_df.empty:
             st.warning("⚠️ 实发与电价数据时段不匹配，无法计算")
             return pd.DataFrame()
@@ -190,21 +233,35 @@ class DataProcessor:
         station_cols = [col for col in generated_24h_df.columns if col != "时段"]
 
         for station in station_cols:
-            # 匹配场站类型（兼容重命名的场站名）
-            base_station = station.split("_")[0]  # 去掉重复后缀
+            # 匹配原始场站名（去掉后缀）
+            base_station = re.sub(r'_\d+$', '', station)  # 去掉_1/_2等后缀
             station_type = None
+            
+            # 识别场站类型
             if base_station in STATION_TYPE_MAP["风电"]:
                 station_type = "风电"
                 contract_col = "风电合约均价(元/MWh)"
             elif base_station in STATION_TYPE_MAP["光伏"]:
                 station_type = "光伏"
                 contract_col = "光伏合约均价(元/MWh)"
+            else:
+                # 模糊匹配
+                for wind_station in STATION_TYPE_MAP["风电"]:
+                    if wind_station in base_station:
+                        station_type = "风电"
+                        contract_col = "风电合约均价(元/MWh)"
+                        break
+                for pv_station in STATION_TYPE_MAP["光伏"]:
+                    if pv_station in base_station:
+                        station_type = "光伏"
+                        contract_col = "光伏合约均价(元/MWh)"
+                        break
             
             if not station_type:
                 st.warning(f"⚠️ 场站[{station}]未配置类型，跳过计算")
                 continue
 
-            # 匹配持仓数据（兼容重命名）
+            # 匹配持仓数据
             total_hold = hold_total_dict.get(base_station, hold_total_dict.get(station, 0))
             if total_hold == 0:
                 st.warning(f"⚠️ 场站[{station}]无持仓数据，跳过计算")
@@ -212,10 +269,11 @@ class DataProcessor:
                 
             hourly_hold = total_hold / 24
 
+            # 逐时段计算
             for _, row in merged_df.iterrows():
-                hourly_generated = row[station]
-                spot_price = row["现货均价(元/MWh)"]
-                contract_price = row[contract_col]
+                hourly_generated = row.get(station, 0)
+                spot_price = row.get("现货均价(元/MWh)", 0)
+                contract_price = row.get(contract_col, 0)
 
                 excess_quantity = max(0, hourly_generated - hourly_hold)
                 excess_profit = excess_quantity * (spot_price - contract_price)
@@ -233,7 +291,9 @@ class DataProcessor:
                         "超额获利(元)": round(excess_profit, 2)
                     })
 
-        return pd.DataFrame(result_rows)
+        result_df = pd.DataFrame(result_rows)
+        result_df = deduplicate_columns(result_df)
+        return result_df
 
 # -------------------------- 6. 页面布局 --------------------------
 st.title("📈 光伏/风电数据管理工具（最终版）")
@@ -267,23 +327,27 @@ with st.expander("📊 模块1：场站实发配置", expanded=False):
                         all_raw_dfs.append(df)
                         all_stations.append(station)
 
-                # 安全合并（核心修复点）
+                # 安全合并
                 if all_raw_dfs:
-                    # 初始化合并数据
                     merged_raw = all_raw_dfs[0].copy()
-                    # 循环合并，避免一次性merge多个导致报错
+                    merged_raw = deduplicate_columns(merged_raw)
+                    
                     for df in all_raw_dfs[1:]:
+                        df = deduplicate_columns(df)
                         try:
+                            # 只合并时间列和非时间列
                             merged_raw = pd.merge(
-                                merged_raw, df, on="时间", how="outer", suffixes=("", f"_{df.columns[1][:4]}")
+                                merged_raw, df, on="时间", how="outer", suffixes=("", "_temp")
                             )
-                        except pd.errors.MergeError as e:
-                            st.warning(f"⚠️ 合并文件{df.columns[1]}失败：{str(e)}，跳过该文件")
+                            merged_raw = deduplicate_columns(merged_raw)
+                        except Exception as e:
+                            st.warning(f"⚠️ 合并文件失败：{str(e)}，跳过该文件")
                             continue
                     
                     # 最终清洗
                     merged_raw = merged_raw.sort_values("时间").reset_index(drop=True)
-                    merged_raw = merged_raw.dropna(subset=["时间"])  # 过滤无时间的行
+                    merged_raw = merged_raw.dropna(subset=["时间"])
+                    merged_raw = deduplicate_columns(merged_raw)  # 最终确保列名唯一
                     
                     st.session_state.core_data["generated"]["raw"] = merged_raw
                     
@@ -327,23 +391,27 @@ with st.expander("📊 模块1：场站实发配置", expanded=False):
             "光伏场站名单（逗号分隔）", value=st.session_state.module_config["generated"]["pv_list"], key="gen_pv_list"
         )
 
-    # 数据预览
+    # 数据预览（核心修复：渲染前强制去重列名）
     if not st.session_state.core_data["generated"]["raw"].empty:
         st.subheader("📋 实发数据预览")
+        # 渲染前最后一次去重
+        display_raw = deduplicate_columns(st.session_state.core_data["generated"]["raw"].copy())
+        display_24h = deduplicate_columns(st.session_state.core_data["generated"]["24h"].copy())
+        
         tab1, tab2 = st.tabs(["原始数据", "24时段汇总"])
         with tab1:
-            st.dataframe(st.session_state.core_data["generated"]["raw"], use_container_width=True)
+            st.dataframe(display_raw, use_container_width=True)
             st.download_button(
                 "💾 下载原始实发数据",
-                data=to_excel(st.session_state.core_data["generated"]["raw"], "原始实发数据"),
+                data=to_excel(display_raw, "原始实发数据"),
                 file_name=f"实发原始数据_{datetime.date.today()}.xlsx",
                 key="download_gen_raw"
             )
         with tab2:
-            st.dataframe(st.session_state.core_data["generated"]["24h"], use_container_width=True)
+            st.dataframe(display_24h, use_container_width=True)
             st.download_button(
                 "💾 下载24时段汇总数据",
-                data=to_excel(st.session_state.core_data["generated"]["24h"], "24时段实发汇总"),
+                data=to_excel(display_24h, "24时段实发汇总"),
                 file_name=f"24时段实发汇总_{datetime.date.today()}.xlsx",
                 key="download_gen_24h"
             )
@@ -368,6 +436,7 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=False):
                 hold_total = {}
                 for file in hold_files:
                     station_name = file.name.split(".")[0].split("-")[0].strip()
+                    station_name = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '_', station_name)
                     total = DataProcessor.extract_hold_data(file, st.session_state.module_config["hold"])
                     hold_total[station_name] = total
                 st.session_state.core_data["hold"]["total"] = hold_total
@@ -403,6 +472,7 @@ with st.expander("💰 模块3：月度电价配置", expanded=False):
             st.success("✅ 已上传电价数据文件")
             if st.button("📝 处理电价数据", key="process_price_data"):
                 price_24h = DataProcessor.extract_price_data(price_file, st.session_state.module_config["price"])
+                price_24h = deduplicate_columns(price_24h)
                 st.session_state.core_data["price"]["24h"] = price_24h
                 st.success("✅ 电价数据处理完成！")
 
@@ -421,12 +491,14 @@ with st.expander("💰 模块3：月度电价配置", expanded=False):
             "光伏合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["pv_contract_col"], key="price_pv_col"
         )
 
+    # 电价数据预览
     if not st.session_state.core_data["price"]["24h"].empty:
         st.subheader("📋 24时段电价数据预览")
-        st.dataframe(st.session_state.core_data["price"]["24h"], use_container_width=True)
+        display_price = deduplicate_columns(st.session_state.core_data["price"]["24h"].copy())
+        st.dataframe(display_price, use_container_width=True)
         st.download_button(
             "💾 下载电价数据",
-            data=to_excel(st.session_state.core_data["price"]["24h"], "24时段电价数据"),
+            data=to_excel(display_price, "24时段电价数据"),
             file_name=f"24时段电价数据_{datetime.date.today()}.xlsx",
             key="download_price_24h"
         )
@@ -445,12 +517,15 @@ if st.button("🔍 计算超额获利", key="calc_excess_profit"):
 
     if not excess_profit_df.empty:
         st.success("✅ 超额获利计算完成！")
-        st.dataframe(excess_profit_df, use_container_width=True)
-        total_profit = excess_profit_df["超额获利(元)"].sum()
+        display_profit = deduplicate_columns(excess_profit_df.copy())
+        st.dataframe(display_profit, use_container_width=True)
+        
+        total_profit = display_profit["超额获利(元)"].sum()
         st.metric("💰 总超额获利（元）", value=round(total_profit, 2))
+        
         st.download_button(
             "💾 下载超额获利数据",
-            data=to_excel(excess_profit_df, "超额获利回收明细"),
+            data=to_excel(display_profit, "超额获利回收明细"),
             file_name=f"超额获利回收明细_{datetime.date.today()}.xlsx",
             key="download_excess_profit"
         )
@@ -458,7 +533,7 @@ if st.button("🔍 计算超额获利", key="calc_excess_profit"):
         # 可视化
         st.subheader("📊 超额获利可视化")
         fig = px.bar(
-            excess_profit_df,
+            display_profit,
             x="时段",
             y="超额获利(元)",
             color="场站名称",
