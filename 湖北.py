@@ -459,7 +459,7 @@ def calculate_difference_streamlit(forecast_file, price_quantity_file, station_p
     
     return result_data, station_coefficient
 
-# ---------------------- 主页面逻辑（核心优化：新增保存按钮） ----------------------
+# ---------------------- 主页面逻辑（核心优化：编辑不实时刷新，保存才同步） ----------------------
 def main():
     # 1. 获取默认配置
     DEFAULT_STATION_PARAMS = get_default_params()
@@ -468,9 +468,21 @@ def main():
     # 2. 初始化session_state（仅首次加载）
     if "station_params" not in st.session_state:
         st.session_state["station_params"] = load_station_params(DEFAULT_STATION_PARAMS)
-    # 初始化临时编辑的参数df（避免实时同步）
-    if "temp_edited_params" not in st.session_state:
-        st.session_state["temp_edited_params"] = None
+    # 初始化缓存的临时参数（用于编辑，仅首次加载/保存后更新）
+    if "cached_editable_params" not in st.session_state:
+        # 构建初始参数表格
+        param_summary = []
+        for station_name, params in st.session_state["station_params"].items():
+            final_coeff = params["online"] - params["prefer"] - params["limit"] - params["mechanism"]
+            param_summary.append({
+                "场站名称": station_name,
+                "上网电量折算系数": params["online"],
+                "优发优购比例": params["prefer"],
+                "限电率": params["limit"],
+                "机制电量比例": params["mechanism"],
+                "最终计算系数": round(final_coeff, 6)
+            })
+        st.session_state["cached_editable_params"] = pd.DataFrame(param_summary)
 
     # 3. 侧边栏（仅保留文件管理）
     with st.sidebar:
@@ -559,25 +571,13 @@ def main():
     forecast_file = st.session_state.get("forecast")
     station_params = st.session_state.get("station_params", DEFAULT_STATION_PARAMS)
     
-    # 4.2 构建参数展示DF（首次加载/重置时初始化临时编辑态）
-    if st.session_state["temp_edited_params"] is None:
-        param_summary = []
-        for station_name, params in station_params.items():
-            final_coeff = params["online"] - params["prefer"] - params["limit"] - params["mechanism"]
-            param_summary.append({
-                "场站名称": station_name,
-                "上网电量折算系数": params["online"],
-                "优发优购比例": params["prefer"],
-                "限电率": params["limit"],
-                "机制电量比例": params["mechanism"],
-                "最终计算系数": round(final_coeff, 6)
-            })
-        st.session_state["temp_edited_params"] = pd.DataFrame(param_summary)
+    # 4.2 复制缓存的参数表作为本地编辑副本（编辑时不修改session_state）
+    editable_df = st.session_state["cached_editable_params"].copy()
     
-    # 4.3 显示可编辑表格（仅修改临时态，不实时同步）
+    # 4.3 显示可编辑表格（编辑的是本地副本，不实时更新session_state）
     st.subheader("📊 当前场站参数汇总（编辑后点击保存生效）")
     edited_df = st.data_editor(
-        st.session_state["temp_edited_params"],
+        editable_df,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -596,37 +596,43 @@ def main():
             ),
             "最终计算系数": st.column_config.NumberColumn(disabled=True, format="%.6f")  # 自动计算，不可改
         },
-        key="station_params_editor"
+        key="station_params_editor",
+        # 关键：禁用实时刷新的配置
+        disabled=False,
+        hide_clear_button=True
     )
-    # 更新临时编辑态（仅内存中，不写文件）
-    st.session_state["temp_edited_params"] = edited_df
     
-    # 4.4 新增：保存参数按钮（点击后才同步到正式参数+写文件）
+    # 4.4 保存参数按钮（点击后才统一同步所有修改）
     col1, col2, col3 = st.columns([1, 8, 1])
     with col1:
         if st.button("💾 保存参数", type="primary"):
-            # 同步编辑后的参数到正式的station_params
-            updated_params = {}
-            for _, row in edited_df.iterrows():
-                station_name = row["场站名称"]
-                # 重新计算最终系数（确保准确性）
-                final_coeff = row["上网电量折算系数"] - row["优发优购比例"] - row["限电率"] - row["机制电量比例"]
-                updated_params[station_name] = {
-                    "online": row["上网电量折算系数"],
-                    "prefer": row["优发优购比例"],
-                    "limit": row["限电率"],
-                    "mechanism": row["机制电量比例"]
-                }
-            # 更新session_state并保存到文件
-            st.session_state["station_params"] = updated_params
-            save_station_params(updated_params)
-            # 刷新临时编辑表的最终系数
-            new_temp_df = edited_df.copy()
-            new_temp_df["最终计算系数"] = new_temp_df.apply(
-                lambda x: round(x["上网电量折算系数"] - x["优发优购比例"] - x["限电率"] - x["机制电量比例"], 6),
-                axis=1
-            )
-            st.session_state["temp_edited_params"] = new_temp_df
+            with st.spinner("正在保存参数..."):
+                # 1. 重新计算最终系数（确保准确性）
+                edited_df["最终计算系数"] = edited_df.apply(
+                    lambda x: round(x["上网电量折算系数"] - x["优发优购比例"] - x["限电率"] - x["机制电量比例"], 6),
+                    axis=1
+                )
+                
+                # 2. 更新缓存的编辑参数表
+                st.session_state["cached_editable_params"] = edited_df
+                
+                # 3. 同步到正式的station_params
+                updated_params = {}
+                for _, row in edited_df.iterrows():
+                    station_name = row["场站名称"]
+                    updated_params[station_name] = {
+                        "online": row["上网电量折算系数"],
+                        "prefer": row["优发优购比例"],
+                        "limit": row["限电率"],
+                        "mechanism": row["机制电量比例"]
+                    }
+                st.session_state["station_params"] = updated_params
+                
+                # 4. 保存到本地文件
+                save_station_params(updated_params)
+                
+                # 5. 刷新页面确保数据同步（可选，提升体验）
+                st.rerun()
 
     # 4.5 执行测算按钮（使用保存后的正式参数）
     run_disabled = not (selected_months and forecast_file)
