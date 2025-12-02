@@ -609,7 +609,7 @@ def main():
         editable_df = pd.DataFrame(param_summary)
         st.session_state["cached_editable_params"] = editable_df
     
-    # 4.4 显示可编辑表格（移除不兼容参数，确保版本兼容）
+    # 4.4 显示可编辑表格（完全兼容所有Streamlit版本）
     st.subheader("📊 当前场站参数汇总（编辑后点击保存生效）")
     edited_df = st.data_editor(
         editable_df,
@@ -632,10 +632,9 @@ def main():
             "最终计算系数": st.column_config.NumberColumn(disabled=True, format="%.6f")  # 自动计算，不可改
         },
         key="station_params_editor"
-        # 移除不兼容的 hide_clear_button 参数
     )
     
-    # 4.5 保存参数按钮（点击后才统一同步所有修改）
+    # 4.5 保存参数按钮（点击后才统一同步所有修改，移除强制刷新）
     col1, col2, col3 = st.columns([1, 8, 1])
     with col1:
         if st.button("💾 保存参数", type="primary"):
@@ -664,9 +663,8 @@ def main():
                 # 4. 保存到本地文件
                 save_station_params(updated_params)
                 
-                # 5. 提示刷新（替换 st.rerun() 兼容旧版本）
-                st.success("参数保存成功！页面将自动刷新...")
-                st.experimental_rerun()
+                # 移除强制刷新，仅提示即可
+                st.success("✅ 参数保存成功！后续测算将使用新参数")
 
     # 4.6 执行测算按钮（使用保存后的正式参数）
     run_disabled = not (selected_months and forecast_file)
