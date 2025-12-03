@@ -14,27 +14,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（适配新需求）
+# 初始化Session State（新增光伏时段配置）
 if "initialized" not in st.session_state:
     st.session_state.initialized = True
     st.session_state.site_data = {}
     st.session_state.current_region = "总部"
     st.session_state.current_province = ""
-    st.session_state.current_year = 2025  # 新增：年份
-    st.session_state.current_power_plant = ""  # 修改：站点→电厂
-    st.session_state.current_plant_type = "风电"  # 新增：电厂类型（风电/光伏）
-    st.session_state.monthly_data = {}  # 新增：存储各月份数据（key:月份，value:DataFrame）
-    st.session_state.selected_months = []  # 新增：多选月份
-    st.session_state.trade_power_typical = {}  # 新增：典型出力曲线方案（分月份）
-    st.session_state.trade_power_linear = {}   # 新增：直线方案（平均分配，分月份）
-    st.session_state.total_annual_trade = 0.0  # 新增：年度总交易电量
+    st.session_state.current_year = 2025
+    st.session_state.current_power_plant = ""
+    st.session_state.current_plant_type = "风电"
+    st.session_state.photovoltaic_start_hour = 6  # 光伏起始发电时段
+    st.session_state.photovoltaic_end_hour = 18   # 光伏结束发电时段
+    st.session_state.monthly_data = {}
+    st.session_state.selected_months = []
+    st.session_state.trade_power_typical = {}
+    st.session_state.trade_power_linear = {}
+    st.session_state.total_annual_trade = 0.0
     st.session_state.mechanism_mode = "小时数"
     st.session_state.guaranteed_mode = "小时数"
     st.session_state.manual_market_hours = 0.0
     st.session_state.auto_calculate = True
     st.session_state.calculated = False
-    st.session_state.market_hours = {}  # 分月份市场化小时数
-    st.session_state.gen_hours = {}     # 分月份预估发电小时数
+    st.session_state.market_hours = {}
+    st.session_state.gen_hours = {}
 
 # -------------------------- 核心工具函数 --------------------------
 def get_days_in_month(year, month):
@@ -45,6 +47,17 @@ def get_days_in_month(year, month):
         return 30
     else:
         return 31
+
+def get_photovoltaic_effective_hours():
+    """获取光伏有效发电时段列表"""
+    start = st.session_state.photovoltaic_start_hour
+    end = st.session_state.photovoltaic_end_hour
+    # 验证时段有效性（1-24）
+    start = max(1, min(24, start))
+    end = max(1, min(24, end))
+    if start > end:
+        start, end = end, start
+    return list(range(start, end + 1))
 
 def init_month_template(month):
     """初始化单个月份的模板数据"""
@@ -66,16 +79,12 @@ def init_month_template(month):
 def export_template():
     """导出Excel模板（包含12个月份子表）"""
     wb = Workbook()
-    # 删除默认工作表
     wb.remove(wb.active)
-    # 为每个月份创建子表
     for month in range(1, 13):
         ws = wb.create_sheet(title=f"{month}月")
         template_df = init_month_template(month)
-        # 写入数据
         for r in dataframe_to_rows(template_df, index=False, header=True):
             ws.append(r)
-    # 保存到 BytesIO
     from io import BytesIO
     output = BytesIO()
     wb.save(output)
@@ -86,10 +95,8 @@ def batch_import_excel(file):
     """批量导入Excel（按子表名称匹配月份）"""
     monthly_data = {}
     try:
-        # 读取所有子表
         xls = pd.ExcelFile(file)
         for sheet_name in xls.sheet_names:
-            # 从子表名称提取月份（如“1月”→1）
             if not sheet_name.endswith("月"):
                 st.warning(f"跳过无效子表：{sheet_name}（需命名为“1月”-“12月”）")
                 continue
@@ -98,14 +105,11 @@ def batch_import_excel(file):
                 if month < 1 or month > 12:
                     st.warning(f"跳过无效月份子表：{sheet_name}（需1-12月）")
                     continue
-                # 读取子表数据
                 df = pd.read_excel(file, sheet_name=sheet_name)
-                # 验证必要列
                 required_cols = ["时段", "平均发电量(MWh)", "当月各时段累计发电量(MWh)", "现货价格(元/MWh)", "中长期价格(元/MWh)"]
                 if not all(col in df.columns for col in required_cols):
                     st.warning(f"子表{sheet_name}缺少必要列，跳过")
                     continue
-                # 补充元数据
                 df["年份"] = st.session_state.current_year
                 df["电厂名称"] = st.session_state.current_power_plant
                 df["电厂类型"] = st.session_state.current_plant_type
@@ -125,9 +129,7 @@ def calculate_core_params_monthly(month, installed_capacity, power_limit_rate, m
         return 0.0, 0.0
     df = st.session_state.monthly_data[month]
     total_generation = df["当月各时段累计发电量(MWh)"].sum()
-    # 预估发电小时数
     gen_hours = round(total_generation / installed_capacity, 2) if installed_capacity > 0 else 0.0
-    # 市场化交易小时数
     if gen_hours <= 0:
         market_hours = 0.0
     else:
@@ -166,39 +168,62 @@ def calculate_trade_power_typical(month, market_hours, installed_capacity):
             "市场化交易电量(MWh)": round(trade_power, 2)
         })
     trade_df = pd.DataFrame(trade_data)
-    # 补充月份信息
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
-    # 数据清洗：填充NaN，确保数值类型
     trade_df = trade_df.fillna(0.0)
     trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
     return trade_df, round(total_trade_power, 2)
 
 def calculate_trade_power_linear(month, total_trade_power):
-    """计算直线方案（平均分配，各时段电量一致）"""
+    """计算直线方案（风电：24时段平均；光伏：仅有效时段平均）"""
     if month not in st.session_state.monthly_data:
         return None
     df = st.session_state.monthly_data[month]
     avg_generation_list = df["平均发电量(MWh)"].tolist()
-    # 平均分配：总电量/24
-    hourly_trade = total_trade_power / 24
-    proportion = 1 / 24  # 每个时段占比1/24
-    
     trade_data = []
-    for hour, avg_gen in enumerate(avg_generation_list, 1):
-        trade_data.append({
-            "时段": hour,
-            "平均发电量(MWh)": avg_gen,
-            "时段比重(%)": round(proportion * 100, 4),
-            "市场化交易电量(MWh)": round(hourly_trade, 2)
-        })
+    
+    if st.session_state.current_plant_type == "光伏":
+        # 光伏：仅有效时段分配电量
+        effective_hours = get_photovoltaic_effective_hours()
+        effective_count = len(effective_hours)
+        if effective_count == 0:
+            effective_count = 1  # 避免除零错误
+        
+        # 有效时段平均电量 = 总电量 / 有效时段数
+        hourly_trade_effective = total_trade_power / effective_count
+        
+        for hour, avg_gen in enumerate(avg_generation_list, 1):
+            if hour in effective_hours:
+                trade_power = hourly_trade_effective
+                proportion = 1 / effective_count
+            else:
+                trade_power = 0.0
+                proportion = 0.0
+            
+            trade_data.append({
+                "时段": hour,
+                "平均发电量(MWh)": avg_gen,
+                "时段比重(%)": round(proportion * 100, 4),
+                "市场化交易电量(MWh)": round(trade_power, 2)
+            })
+    else:
+        # 风电：24时段平均分配
+        hourly_trade = total_trade_power / 24
+        proportion = 1 / 24
+        
+        for hour, avg_gen in enumerate(avg_generation_list, 1):
+            trade_data.append({
+                "时段": hour,
+                "平均发电量(MWh)": avg_gen,
+                "时段比重(%)": round(proportion * 100, 4),
+                "市场化交易电量(MWh)": round(hourly_trade, 2)
+            })
+    
     trade_df = pd.DataFrame(trade_data)
-    # 补充月份信息
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
-    # 数据清洗：填充NaN，确保数值类型
     trade_df = trade_df.fillna(0.0)
     trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
     return trade_df
@@ -207,10 +232,8 @@ def decompose_to_daily(trade_df, year, month):
     """将月度24时段电量分解到每天（按月份天数平均）"""
     days = get_days_in_month(year, month)
     df = trade_df.copy()
-    # 计算每日该时段电量：月度时段电量 / 天数
     df["每日时段电量(MWh)"] = round(df["市场化交易电量(MWh)"] / days, 4)
     df["月份天数"] = days
-    # 数据清洗
     df = df.fillna(0.0)
     return df
 
@@ -220,8 +243,9 @@ def export_annual_plan():
     wb.remove(wb.active)
     total_annual = 0.0
     
-    # 1. 年度汇总表
+    # 1. 年度汇总表（新增光伏时段说明）
     summary_data = []
+    pv_hours_note = f"{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else "24小时"
     for month in st.session_state.selected_months:
         if month not in st.session_state.trade_power_typical:
             continue
@@ -235,6 +259,7 @@ def export_annual_plan():
             "月份": month,
             "电厂名称": st.session_state.current_power_plant,
             "电厂类型": st.session_state.current_plant_type,
+            "发电时段配置": pv_hours_note,
             "典型方案总电量(MWh)": total_typical,
             "直线方案总电量(MWh)": total_linear,
             "月份天数": get_days_in_month(st.session_state.current_year, month),
@@ -245,20 +270,16 @@ def export_annual_plan():
     for r in dataframe_to_rows(summary_df, index=False, header=True):
         ws_summary.append(r)
     
-    # 2. 各月份详细表（模板内容+两种方案+日分解）
+    # 2. 各月份详细表
     for month in st.session_state.selected_months:
         if month not in st.session_state.monthly_data:
             continue
-        # 模板基础数据
         base_df = st.session_state.monthly_data[month].copy()
-        # 典型方案数据（含日分解）
         typical_df = st.session_state.trade_power_typical[month].copy()
         typical_daily = decompose_to_daily(typical_df, st.session_state.current_year, month)
-        # 直线方案数据（含日分解）
         linear_df = st.session_state.trade_power_linear[month].copy()
         linear_daily = decompose_to_daily(linear_df, st.session_state.current_year, month)
         
-        # 合并数据（按时段）
         merged_df = base_df.merge(
             typical_daily[["时段", "时段比重(%)", "市场化交易电量(MWh)", "每日时段电量(MWh)"]],
             on="时段", suffixes=("", "_典型")
@@ -267,26 +288,27 @@ def export_annual_plan():
             on="时段", suffixes=("", "_直线")
         )
         
-        # 创建子表
         ws_month = wb.create_sheet(title=f"{month}月详情")
         for r in dataframe_to_rows(merged_df, index=False, header=True):
             ws_month.append(r)
     
-    # 3. 方案说明表
+    # 3. 方案说明表（新增光伏时段说明）
     ws_desc = wb.create_sheet(title="方案说明")
+    pv_desc = f"光伏有效发电时段：{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点（直线方案仅在此时段分配电量）" if st.session_state.current_plant_type == "光伏" else "风电为24小时发电（直线方案全时段平均分配）"
     desc_content = [
         ["新能源电厂年度交易方案说明"],
         [""],
         ["基础信息："],
         [f"电厂名称：{st.session_state.current_power_plant}"],
         [f"电厂类型：{st.session_state.current_plant_type}"],
+        [f"{pv_desc}"],
         [f"年份：{st.session_state.current_year}"],
         [f"区域：{st.session_state.current_region}"],
         [f"省份：{st.session_state.current_province}"],
         [""],
         ["方案说明："],
         ["1. 典型出力曲线方案：按各时段平均发电量权重分配交易电量"],
-        ["2. 直线方案：各时段交易电量平均分配（总电量与典型方案一致）"],
+        ["2. 直线方案：风电24时段平均分配；光伏仅在有效发电时段平均分配（总电量与典型方案一致）"],
         ["3. 日分解电量：月度时段电量 ÷ 当月天数，用于日常执行"],
         [""],
         [f"年度总交易电量（典型方案）：{round(total_annual, 2)} MWh"]
@@ -294,7 +316,6 @@ def export_annual_plan():
     for row in desc_content:
         ws_desc.append(row)
     
-    # 保存到BytesIO
     from io import BytesIO
     output = BytesIO()
     wb.save(output)
@@ -314,10 +335,10 @@ REGIONS = {
     "内蒙古电网": ["蒙西"]
 }
 
-# -------------------------- 侧边栏配置（适配新需求） --------------------------
+# -------------------------- 侧边栏配置 --------------------------
 st.sidebar.header("⚙️ 基础信息配置")
 
-# 1. 年份选择（新增）
+# 1. 年份选择
 years = list(range(2020, 2031))
 st.session_state.current_year = st.sidebar.selectbox(
     "选择年份", years,
@@ -344,10 +365,10 @@ selected_province = st.sidebar.selectbox(
 )
 st.session_state.current_province = selected_province
 
-# 3. 电厂信息（修改+新增）
+# 3. 电厂信息
 plant_name = st.sidebar.text_input(
     "电厂名称", value=st.session_state.current_power_plant,
-    key="sidebar_plant_name", placeholder="如：张家口风电场"
+    key="sidebar_plant_name", placeholder="如：张家口风电场/青海光伏电站"
 )
 st.session_state.current_power_plant = plant_name
 
@@ -356,6 +377,26 @@ st.session_state.current_plant_type = st.sidebar.selectbox(
     index=["风电", "光伏"].index(st.session_state.current_plant_type),
     key="sidebar_plant_type"
 )
+
+# 新增：光伏有效发电时段配置（仅光伏类型显示）
+if st.session_state.current_plant_type == "光伏":
+    st.sidebar.subheader("☀️ 光伏发电时段配置")
+    col_pv1, col_pv2 = st.sidebar.columns(2)
+    with col_pv1:
+        st.session_state.photovoltaic_start_hour = st.number_input(
+            "起始时段（点）", min_value=1, max_value=24,
+            value=st.session_state.photovoltaic_start_hour,
+            key="pv_start_hour"
+        )
+    with col_pv2:
+        st.session_state.photovoltaic_end_hour = st.number_input(
+            "结束时段（点）", min_value=1, max_value=24,
+            value=st.session_state.photovoltaic_end_hour,
+            key="pv_end_hour"
+        )
+    # 显示当前有效时段
+    effective_hours = get_photovoltaic_effective_hours()
+    st.sidebar.info(f"当前有效发电时段：{effective_hours}点（共{len(effective_hours)}个时段）")
 
 # 4. 装机容量
 installed_capacity = st.sidebar.number_input(
@@ -406,7 +447,7 @@ power_limit_rate = st.sidebar.number_input(
     key="sidebar_power_limit_rate", help="电厂当月限电比例，0-100%"
 )
 
-# 市场化交易小时数（自动/手动）
+# 市场化交易小时数
 st.sidebar.write("#### 市场化交易小时数")
 auto_calculate = st.sidebar.toggle(
     "自动计算", value=st.session_state.auto_calculate,
@@ -424,9 +465,10 @@ if not st.session_state.auto_calculate:
 
 # -------------------------- 主页面内容 --------------------------
 st.title("⚡ 新能源电厂年度方案设计系统")
+pv_hours_display = f" | 光伏发电时段：{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else ""
 st.subheader(
     f"当前配置：{st.session_state.current_year}年 | {st.session_state.current_region} | {st.session_state.current_province} | "
-    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}"
+    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}{pv_hours_display}"
 )
 
 # 一、模板导出与批量导入区域
@@ -456,11 +498,10 @@ with col_import2:
         monthly_data = batch_import_excel(batch_file)
         if monthly_data:
             st.session_state.monthly_data = monthly_data
-            # 自动选中导入的月份
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（从侧边栏移到此处）
+# 3. 月份多选
 with col_import3:
     st.session_state.selected_months = st.multiselect(
         "选择需要处理的月份",
@@ -488,7 +529,7 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度方案（含两种方案）
+# 2. 生成年度方案
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
         if not st.session_state.selected_months or not st.session_state.monthly_data:
@@ -498,14 +539,13 @@ with col_data2:
         else:
             with st.spinner("🔄 正在计算年度方案（含典型/直线双方案）..."):
                 try:
-                    trade_typical = {}  # 典型方案
-                    trade_linear = {}    # 直线方案
-                    market_hours = {}   # 分月份市场化小时数
-                    gen_hours = {}       # 分月份发电小时数
-                    total_annual = 0.0   # 年度总电量
+                    trade_typical = {}
+                    trade_linear = {}
+                    market_hours = {}
+                    gen_hours = {}
+                    total_annual = 0.0
                     
                     for month in st.session_state.selected_months:
-                        # 计算核心参数（市场化小时数）
                         if st.session_state.auto_calculate:
                             gh, mh = calculate_core_params_monthly(
                                 month, installed_capacity, power_limit_rate,
@@ -518,7 +558,6 @@ with col_data2:
                         market_hours[month] = mh
                         gen_hours[month] = gh
                         
-                        # 计算典型方案
                         typical_df, total_typical = calculate_trade_power_typical(month, mh, installed_capacity)
                         if typical_df is None:
                             st.error(f"❌ 月份{month}典型方案计算失败")
@@ -526,14 +565,12 @@ with col_data2:
                         trade_typical[month] = typical_df
                         total_annual += total_typical
                         
-                        # 计算直线方案（总电量与典型方案一致）
                         linear_df = calculate_trade_power_linear(month, total_typical)
                         if linear_df is None:
                             st.error(f"❌ 月份{month}直线方案计算失败")
                             continue
                         trade_linear[month] = linear_df
                     
-                    # 保存到session_state
                     st.session_state.trade_power_typical = trade_typical
                     st.session_state.trade_power_linear = trade_linear
                     st.session_state.market_hours = market_hours
@@ -572,7 +609,6 @@ with col_data3:
 if st.session_state.selected_months and st.session_state.monthly_data:
     st.divider()
     st.header("📊 选中月份数据编辑")
-    # 选择要编辑的月份
     edit_month = st.selectbox(
         "选择要编辑的月份",
         st.session_state.selected_months,
@@ -600,7 +636,7 @@ if st.session_state.selected_months and st.session_state.monthly_data:
         )
         st.session_state.monthly_data[edit_month] = edit_df
 
-# 四、年度方案展示（双方案对比）
+# 四、年度方案展示
 if st.session_state.calculated and st.session_state.selected_months:
     st.divider()
     st.header(f"📈 {st.session_state.current_year}年度方案展示（双方案对比）")
@@ -608,6 +644,7 @@ if st.session_state.calculated and st.session_state.selected_months:
     # 1. 年度汇总
     st.subheader("1. 年度汇总")
     summary_data = []
+    pv_hours_note = f"{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else "24小时"
     for month in st.session_state.selected_months:
         typical_total = st.session_state.trade_power_typical[month]["市场化交易电量(MWh)"].sum()
         linear_total = st.session_state.trade_power_linear[month]["市场化交易电量(MWh)"].sum()
@@ -619,13 +656,14 @@ if st.session_state.calculated and st.session_state.selected_months:
             "预估发电小时数": st.session_state.gen_hours[month],
             "典型方案电量(MWh)": typical_total,
             "直线方案电量(MWh)": linear_total,
+            "发电时段配置": pv_hours_note,
             "占年度比重(%)": round(typical_total / st.session_state.total_annual_trade * 100, 2)
         })
     summary_df = pd.DataFrame(summary_data)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
     st.metric("年度总交易电量（典型方案）", f"{st.session_state.total_annual_trade:.2f} MWh")
     
-    # 2. 月份方案详情（双方案对比）
+    # 2. 月份方案详情
     st.subheader("2. 月份方案详情（双方案对比）")
     view_month = st.selectbox(
         "选择查看的月份",
@@ -636,15 +674,12 @@ if st.session_state.calculated and st.session_state.selected_months:
     # 典型方案展示
     st.write(f"### 典型出力曲线方案（{view_month}月）")
     typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
-    # 深度数据清洗
     typical_df = typical_df.fillna(0.0)
     typical_df["市场化交易电量(MWh)"] = typical_df["市场化交易电量(MWh)"].astype(np.float64)
     typical_df = typical_df.reset_index(drop=True)
     st.dataframe(typical_df, use_container_width=True, hide_index=True)
     
-    # 典型方案图表（极简版，仅保留核心参数）
     try:
-        # 确保数据非空且为数值
         chart_data = typical_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
         if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
             st.write(f"#### {view_month}月典型方案电量分布")
@@ -654,18 +689,22 @@ if st.session_state.calculated and st.session_state.selected_months:
     except Exception as e:
         st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
     
-    # 直线方案展示
-    st.write(f"### 直线方案（平均分配，{view_month}月）")
+    # 直线方案展示（新增光伏时段说明）
+    st.write(f"### 直线方案（{view_month}月）")
     linear_df = st.session_state.trade_power_linear[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
-    # 深度数据清洗
     linear_df = linear_df.fillna(0.0)
     linear_df["市场化交易电量(MWh)"] = linear_df["市场化交易电量(MWh)"].astype(np.float64)
     linear_df = linear_df.reset_index(drop=True)
     st.dataframe(linear_df, use_container_width=True, hide_index=True)
     
-    # 直线方案图表（极简版，仅保留核心参数）
+    # 直线方案说明
+    if st.session_state.current_plant_type == "光伏":
+        effective_hours = get_photovoltaic_effective_hours()
+        st.info(f"注：光伏直线方案仅在{effective_hours}点（共{len(effective_hours)}个时段）分配电量，总电量={linear_df['市场化交易电量(MWh)'].sum():.2f} MWh，有效时段平均电量={linear_df['市场化交易电量(MWh)'].max():.2f} MWh/时段")
+    else:
+        st.info(f"注：风电直线方案24时段平均分配，总电量={linear_df['市场化交易电量(MWh)'].sum():.2f} MWh，平均电量={linear_df['市场化交易电量(MWh)'].iloc[0]:.2f} MWh/时段")
+    
     try:
-        # 确保数据非空且为数值
         chart_data = linear_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
         if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
             st.write(f"#### {view_month}月直线方案电量分布")
@@ -675,9 +714,8 @@ if st.session_state.calculated and st.session_state.selected_months:
     except Exception as e:
         st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
     
-    # 3. 日分解展示（当前查看月份）
+    # 3. 日分解展示
     st.subheader(f"3. {view_month}月日分解电量（按天数平均）")
-    # 典型方案日分解
     typical_daily = decompose_to_daily(st.session_state.trade_power_typical[view_month], st.session_state.current_year, view_month)
     linear_daily = decompose_to_daily(st.session_state.trade_power_linear[view_month], st.session_state.current_year, view_month)
     
@@ -687,11 +725,10 @@ if st.session_state.calculated and st.session_state.selected_months:
         "直线方案日电量(MWh)": linear_daily["每日时段电量(MWh)"],
         "月份天数": typical_daily["月份天数"]
     })
-    # 数据清洗
     daily_compare = daily_compare.fillna(0.0)
     st.dataframe(daily_compare, use_container_width=True, hide_index=True)
     st.info(f"注：日电量 = 月度时段电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）")
 
 # 页脚
 st.divider()
-st.caption(f"© {st.session_state.current_year} 新能源电厂年度方案设计系统 | 支持风电/光伏双类型 | 双方案对比导出")
+st.caption(f"© {st.session_state.current_year} 新能源电厂年度方案设计系统 | 风电24小时/光伏时段化直线方案 | 双方案对比导出")
