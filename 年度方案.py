@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（仅初始化一次）
+# 初始化Session State（仅初始化一次，避免重复刷新）
 if "initialized" not in st.session_state:
     st.session_state.initialized = True
     st.session_state.site_data = {}
@@ -536,7 +536,7 @@ if st.session_state.calculated and st.session_state.trade_power_data is not None
     )
     st.session_state.adjusted_trade_power = adjust_df
 
-    # 实时状态显示
+    # 实时状态显示（修复缩进和st.metric参数）
     current_sum = adjust_df["市场化交易电量(MWh)"].sum()
     diff = st.session_state.total_trade_power - current_sum
     
@@ -551,13 +551,10 @@ if st.session_state.calculated and st.session_state.trade_power_data is not None
     with col_status3:
         spot_price_list = st.session_state.current_24h_data["现货价格(元/MWh)"].tolist()
         if sum(spot_price_list) <= 0:
-            # 兼容全0的情况
-            st.metric("最高电价时段", "无有效电价", value="0.00元/MWh")
+            st.metric("最高电价时段", "无有效电价", delta="0.00元/MWh")
         else:
-            # 关键修复：else 后代码块缩进（4个空格）
             max_price_hour = spot_price_list.index(max(spot_price_list)) + 1
             max_price = max(spot_price_list)
-            # 正确格式：label, value, delta（delta可选）
             st.metric("最高电价时段", f"{max_price_hour}时", delta=f"{max_price:.2f}元/MWh")
 
     # 对比展示
