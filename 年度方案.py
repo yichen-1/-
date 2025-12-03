@@ -4,7 +4,7 @@ import numpy as np
 import os
 from datetime import datetime
 
-# -------------------------- 初始化配置（严格遵循Streamlit规则） --------------------------
+# -------------------------- 初始化配置 --------------------------
 st.set_page_config(
     page_title="新能源场站年度方案设计系统",
     page_icon="⚡",
@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（所有初始化放在最前面，且仅初始化一次）
+# 初始化Session State（严格遵循Streamlit规则）
 def init_session_state():
     default_states = {
         "site_data": {},
@@ -204,7 +204,8 @@ with col_mech1:
 
 with col_mech2:
     mech_min = 0.0
-    mech_max = 100.0 if st.session_state.mechanism_mode == "比例(%)" else float("inf")
+    # 修复：替换float("inf")为合理极大值1000000.0
+    mech_max = 100.0 if st.session_state.mechanism_mode == "比例(%)" else 1000000.0
     mechanism_value = st.number_input(
         "数值",
         min_value=mech_min,
@@ -230,7 +231,8 @@ with col_gua1:
 
 with col_gua2:
     gua_min = 0.0
-    gua_max = 100.0 if st.session_state.guaranteed_mode == "比例(%)" else float("inf")
+    # 修复：替换float("inf")为合理极大值1000000.0
+    gua_max = 100.0 if st.session_state.guaranteed_mode == "比例(%)" else 1000000.0
     guaranteed_value = st.number_input(
         "数值",
         min_value=gua_min,
@@ -278,12 +280,16 @@ if st.session_state.auto_calculate:
         value=market_hours,
         step=0.1,
         disabled=True,
-        key="sidebar_market_hours_auto"
+        key="sidebar_market_hours_auto",
+        # 修复：添加合理的max_value
+        min_value=0.0,
+        max_value=1000000.0
     )
 else:
     market_hours = st.sidebar.number_input(
         "手动输入",
         min_value=0.0,
+        max_value=1000000.0,  # 修复：添加合理的max_value
         value=st.session_state.manual_market_hours,
         step=0.1,
         key="sidebar_market_hours_manual"
