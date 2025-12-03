@@ -554,10 +554,11 @@ if st.session_state.calculated and st.session_state.trade_power_data is not None
             # 兼容全0的情况
             st.metric("最高电价时段", "无有效电价", value="0.00元/MWh")
         else:
-        max_price_hour = spot_price_list.index(max(spot_price_list)) + 1
-        max_price = max(spot_price_list)
-        # 正确格式：label, value, delta（delta可选）
-        st.metric("最高电价时段", f"{max_price_hour}时", delta=f"{max_price:.2f}元/MWh")
+            # 关键修复：else 后代码块缩进（4个空格）
+            max_price_hour = spot_price_list.index(max(spot_price_list)) + 1
+            max_price = max(spot_price_list)
+            # 正确格式：label, value, delta（delta可选）
+            st.metric("最高电价时段", f"{max_price_hour}时", delta=f"{max_price:.2f}元/MWh")
 
     # 对比展示
     st.subheader("📊 调整前后对比")
