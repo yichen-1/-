@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（新增光伏时段配置）
+# 初始化Session State（新增光伏套利时段配置）
 if "initialized" not in st.session_state:
     st.session_state.initialized = True
     st.session_state.site_data = {}
@@ -23,12 +23,17 @@ if "initialized" not in st.session_state:
     st.session_state.current_year = 2025
     st.session_state.current_power_plant = ""
     st.session_state.current_plant_type = "风电"
-    st.session_state.photovoltaic_start_hour = 6  # 光伏起始发电时段
-    st.session_state.photovoltaic_end_hour = 18   # 光伏结束发电时段
+    
+    # 光伏时段配置（套利曲线专用）
+    st.session_state.pv_core_start = 11   # 中午核心时段起始（11点）
+    st.session_state.pv_core_end = 14     # 中午核心时段结束（14点）
+    st.session_state.pv_edge_start = 6    # 两端边缘时段起始（6点）
+    st.session_state.pv_edge_end = 18     # 两端边缘时段结束（18点）
+    
     st.session_state.monthly_data = {}
     st.session_state.selected_months = []
-    st.session_state.trade_power_typical = {}
-    st.session_state.trade_power_linear = {}
+    st.session_state.trade_power_typical = {}  # 方案一：典型曲线
+    st.session_state.trade_power_arbitrage = {} # 方案二：光伏套利/风电直线
     st.session_state.total_annual_trade = 0.0
     st.session_state.mechanism_mode = "小时数"
     st.session_state.guaranteed_mode = "小时数"
@@ -48,16 +53,20 @@ def get_days_in_month(year, month):
     else:
         return 31
 
-def get_photovoltaic_effective_hours():
-    """获取光伏有效发电时段列表"""
-    start = st.session_state.photovoltaic_start_hour
-    end = st.session_state.photovoltaic_end_hour
-    # 验证时段有效性（1-24）
-    start = max(1, min(24, start))
-    end = max(1, min(24, end))
-    if start > end:
-        start, end = end, start
-    return list(range(start, end + 1))
+def get_pv_arbitrage_hours():
+    """获取光伏套利曲线的时段划分"""
+    # 核心时段（中午，电量接收端）
+    core_hours = list(range(st.session_state.pv_core_start, st.session_state.pv_core_end + 1))
+    # 边缘时段（两端，电量转出端）
+    edge_hours = [h for h in range(st.session_state.pv_edge_start, st.session_state.pv_edge_end + 1) if h not in core_hours]
+    # 无效时段（非发电时段）
+    invalid_hours = [h for h in range(1, 25) if h not in range(st.session_state.pv_edge_start, st.session_state.pv_edge_end + 1)]
+    
+    return {
+        "core": core_hours,       # 中午核心时段（11-14点）
+        "edge": edge_hours,       # 两端边缘时段（6-10,15-18点）
+        "invalid": invalid_hours  # 无效时段（1-5,19-24点）
+    }
 
 def init_month_template(month):
     """初始化单个月份的模板数据"""
@@ -146,7 +155,7 @@ def calculate_core_params_monthly(month, installed_capacity, power_limit_rate, m
     return gen_hours, market_hours
 
 def calculate_trade_power_typical(month, market_hours, installed_capacity):
-    """计算典型出力曲线方案（按发电权重分配）"""
+    """方案一：典型出力曲线（按发电权重分配）"""
     if month not in st.session_state.monthly_data:
         return None, 0.0
     df = st.session_state.monthly_data[month]
@@ -165,151 +174,195 @@ def calculate_trade_power_typical(month, market_hours, installed_capacity):
             "时段": hour,
             "平均发电量(MWh)": avg_gen,
             "时段比重(%)": round(proportion * 100, 4),
-            "市场化交易电量(MWh)": round(trade_power, 2)
+            "方案一月度电量(MWh)": round(trade_power, 2)
         })
     trade_df = pd.DataFrame(trade_data)
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
     trade_df = trade_df.fillna(0.0)
-    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
+    trade_df["方案一月度电量(MWh)"] = trade_df["方案一月度电量(MWh)"].astype(np.float64)
     return trade_df, round(total_trade_power, 2)
 
-def calculate_trade_power_linear(month, total_trade_power):
-    """计算直线方案（风电：24时段平均；光伏：仅有效时段平均）"""
+def calculate_trade_power_arbitrage(month, total_trade_power, typical_df):
+    """方案二：光伏套利曲线/风电直线曲线"""
     if month not in st.session_state.monthly_data:
         return None
-    df = st.session_state.monthly_data[month]
-    avg_generation_list = df["平均发电量(MWh)"].tolist()
-    trade_data = []
     
     if st.session_state.current_plant_type == "光伏":
-        # 光伏：仅有效时段分配电量
-        effective_hours = get_photovoltaic_effective_hours()
-        effective_count = len(effective_hours)
-        if effective_count == 0:
-            effective_count = 1  # 避免除零错误
+        # 光伏方案二：套利曲线（两端电量转移到中午核心时段）
+        pv_hours = get_pv_arbitrage_hours()
+        core_hours = pv_hours["core"]
+        edge_hours = pv_hours["edge"]
+        invalid_hours = pv_hours["invalid"]
         
-        # 有效时段平均电量 = 总电量 / 有效时段数
-        hourly_trade_effective = total_trade_power / effective_count
+        # 1. 计算典型曲线中边缘时段的总电量（要转移的电量）
+        edge_total = typical_df[typical_df["时段"].isin(edge_hours)]["方案一月度电量(MWh)"].sum()
+        # 2. 核心时段数量
+        core_count = len(core_hours)
+        core_count = core_count if core_count > 0 else 1
+        # 3. 每个核心时段增加的电量
+        core_add = edge_total / core_count
         
-        for hour, avg_gen in enumerate(avg_generation_list, 1):
-            if hour in effective_hours:
-                trade_power = hourly_trade_effective
-                proportion = 1 / effective_count
-            else:
+        trade_data = []
+        for idx, row in typical_df.iterrows():
+            hour = row["时段"]
+            avg_gen = row["平均发电量(MWh)"]
+            
+            if hour in invalid_hours:
+                # 无效时段：电量=0
                 trade_power = 0.0
                 proportion = 0.0
+            elif hour in edge_hours:
+                # 边缘时段：电量=0（全部转移）
+                trade_power = 0.0
+                proportion = 0.0
+            elif hour in core_hours:
+                # 核心时段：原典型电量 + 转移电量
+                trade_power = row["方案一月度电量(MWh)"] + core_add
+                proportion = trade_power / total_trade_power
+            else:
+                # 其他时段：保持典型电量
+                trade_power = row["方案一月度电量(MWh)"]
+                proportion = trade_power / total_trade_power
             
             trade_data.append({
                 "时段": hour,
                 "平均发电量(MWh)": avg_gen,
                 "时段比重(%)": round(proportion * 100, 4),
-                "市场化交易电量(MWh)": round(trade_power, 2)
+                "方案二月度电量(MWh)": round(trade_power, 2)
             })
+        
+        trade_df = pd.DataFrame(trade_data)
+    
     else:
-        # 风电：24时段平均分配
+        # 风电方案二：24时段直线平均
+        avg_generation_list = st.session_state.monthly_data[month]["平均发电量(MWh)"].tolist()
         hourly_trade = total_trade_power / 24
         proportion = 1 / 24
         
+        trade_data = []
         for hour, avg_gen in enumerate(avg_generation_list, 1):
             trade_data.append({
                 "时段": hour,
                 "平均发电量(MWh)": avg_gen,
                 "时段比重(%)": round(proportion * 100, 4),
-                "市场化交易电量(MWh)": round(hourly_trade, 2)
+                "方案二月度电量(MWh)": round(hourly_trade, 2)
             })
+        trade_df = pd.DataFrame(trade_data)
     
-    trade_df = pd.DataFrame(trade_data)
+    # 数据清洗和补充
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
     trade_df = trade_df.fillna(0.0)
-    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
+    trade_df["方案二月度电量(MWh)"] = trade_df["方案二月度电量(MWh)"].astype(np.float64)
+    
+    # 确保方案二总电量和方案一一致
+    trade_df["方案二月度电量(MWh)"] = trade_df["方案二月度电量(MWh)"] * (total_trade_power / trade_df["方案二月度电量(MWh)"].sum())
     return trade_df
 
-def decompose_to_daily(trade_df, year, month):
-    """将月度24时段电量分解到每天（按月份天数平均）"""
+def decompose_double_scheme(typical_df, arbitrage_df, year, month):
+    """双方案日分解（返回四列数据：方案一/二月度+日分解）"""
     days = get_days_in_month(year, month)
-    df = trade_df.copy()
-    df["每日时段电量(MWh)"] = round(df["市场化交易电量(MWh)"] / days, 4)
-    df["月份天数"] = days
+    df = pd.DataFrame({
+        "时段": typical_df["时段"],
+        "方案一月度电量(MWh)": typical_df["方案一月度电量(MWh)"],
+        "方案一日分解电量(MWh)": round(typical_df["方案一月度电量(MWh)"] / days, 4),
+        "方案二月度电量(MWh)": arbitrage_df["方案二月度电量(MWh)"],
+        "方案二日分解电量(MWh)": round(arbitrage_df["方案二月度电量(MWh)"] / days, 4),
+        "月份天数": days
+    })
     df = df.fillna(0.0)
     return df
 
 def export_annual_plan():
-    """导出年度方案Excel（包含两种方案+日分解+模板内容）"""
+    """导出年度方案Excel（双方案月度+日分解四列数据）"""
     wb = Workbook()
     wb.remove(wb.active)
     total_annual = 0.0
     
-    # 1. 年度汇总表（新增光伏时段说明）
+    # 1. 年度汇总表（双方案总量）
     summary_data = []
-    pv_hours_note = f"{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else "24小时"
+    scheme2_note = "套利曲线（两端转中午）" if st.session_state.current_plant_type == "光伏" else "直线曲线（24小时平均）"
     for month in st.session_state.selected_months:
         if month not in st.session_state.trade_power_typical:
             continue
         typical_df = st.session_state.trade_power_typical[month]
-        linear_df = st.session_state.trade_power_linear[month]
-        total_typical = typical_df["市场化交易电量(MWh)"].sum()
-        total_linear = linear_df["市场化交易电量(MWh)"].sum()
+        arbitrage_df = st.session_state.trade_power_arbitrage[month]
+        total_typical = typical_df["方案一月度电量(MWh)"].sum()
+        total_arbitrage = arbitrage_df["方案二月度电量(MWh)"].sum()
         total_annual += total_typical
         summary_data.append({
             "年份": st.session_state.current_year,
             "月份": month,
             "电厂名称": st.session_state.current_power_plant,
             "电厂类型": st.session_state.current_plant_type,
-            "发电时段配置": pv_hours_note,
-            "典型方案总电量(MWh)": total_typical,
-            "直线方案总电量(MWh)": total_linear,
+            "方案一（典型曲线）总电量(MWh)": total_typical,
+            "方案二（{}）总电量(MWh)".format(scheme2_note): total_arbitrage,
             "月份天数": get_days_in_month(st.session_state.current_year, month),
-            "市场化小时数": st.session_state.market_hours.get(month, 0.0)
+            "市场化小时数": st.session_state.market_hours.get(month, 0.0),
+            "占年度比重(%)": round(total_typical / st.session_state.total_annual_trade * 100, 2)
         })
     summary_df = pd.DataFrame(summary_data)
     ws_summary = wb.create_sheet(title="年度汇总")
     for r in dataframe_to_rows(summary_df, index=False, header=True):
         ws_summary.append(r)
     
-    # 2. 各月份详细表
+    # 2. 各月份详细表（双方案月度+日分解四列）
     for month in st.session_state.selected_months:
         if month not in st.session_state.monthly_data:
             continue
-        base_df = st.session_state.monthly_data[month].copy()
-        typical_df = st.session_state.trade_power_typical[month].copy()
-        typical_daily = decompose_to_daily(typical_df, st.session_state.current_year, month)
-        linear_df = st.session_state.trade_power_linear[month].copy()
-        linear_daily = decompose_to_daily(linear_df, st.session_state.current_year, month)
+        # 基础数据
+        base_df = st.session_state.monthly_data[month][["时段", "平均发电量(MWh)", "现货价格(元/MWh)", "中长期价格(元/MWh)"]].copy()
+        # 典型曲线（方案一）
+        typical_df = st.session_state.trade_power_typical[month][["时段", "方案一月度电量(MWh)", "时段比重(%)"]].copy()
+        typical_df.rename(columns={"时段比重(%)": "方案一时段比重(%)"}, inplace=True)
+        # 套利/直线曲线（方案二）
+        arbitrage_df = st.session_state.trade_power_arbitrage[month][["时段", "方案二月度电量(MWh)", "时段比重(%)"]].copy()
+        arbitrage_df.rename(columns={"时段比重(%)": "方案二时段比重(%)"}, inplace=True)
+        # 双方案日分解
+        decompose_df = decompose_double_scheme(
+            st.session_state.trade_power_typical[month],
+            st.session_state.trade_power_arbitrage[month],
+            st.session_state.current_year,
+            month
+        )[["时段", "方案一日分解电量(MWh)", "方案二日分解电量(MWh)", "月份天数"]].copy()
         
-        merged_df = base_df.merge(
-            typical_daily[["时段", "时段比重(%)", "市场化交易电量(MWh)", "每日时段电量(MWh)"]],
-            on="时段", suffixes=("", "_典型")
-        ).merge(
-            linear_daily[["时段", "时段比重(%)", "市场化交易电量(MWh)", "每日时段电量(MWh)"]],
-            on="时段", suffixes=("", "_直线")
-        )
+        # 合并所有数据
+        merged_df = base_df.merge(typical_df, on="时段")
+        merged_df = merged_df.merge(arbitrage_df, on="时段")
+        merged_df = merged_df.merge(decompose_df, on="时段")
         
+        # 创建子表
         ws_month = wb.create_sheet(title=f"{month}月详情")
         for r in dataframe_to_rows(merged_df, index=False, header=True):
             ws_month.append(r)
     
-    # 3. 方案说明表（新增光伏时段说明）
+    # 3. 方案说明表
     ws_desc = wb.create_sheet(title="方案说明")
-    pv_desc = f"光伏有效发电时段：{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点（直线方案仅在此时段分配电量）" if st.session_state.current_plant_type == "光伏" else "风电为24小时发电（直线方案全时段平均分配）"
+    pv_desc = f"""
+    光伏方案二（套利曲线）：
+    - 核心时段：{st.session_state.pv_core_start}-{st.session_state.pv_core_end}点（接收电量）
+    - 边缘时段：{st.session_state.pv_edge_start}-{st.session_state.pv_core_start-1}点、{st.session_state.pv_core_end+1}-{st.session_state.pv_edge_end}点（转出电量）
+    - 逻辑：将边缘时段的市场化交易电量全部转移至核心时段，总电量保持不变
+    """ if st.session_state.current_plant_type == "光伏" else """
+    风电方案二（直线曲线）：
+    - 逻辑：24小时平均分配市场化交易电量，总电量与典型曲线一致
+    """
     desc_content = [
         ["新能源电厂年度交易方案说明"],
         [""],
         ["基础信息："],
         [f"电厂名称：{st.session_state.current_power_plant}"],
         [f"电厂类型：{st.session_state.current_plant_type}"],
-        [f"{pv_desc}"],
         [f"年份：{st.session_state.current_year}"],
         [f"区域：{st.session_state.current_region}"],
         [f"省份：{st.session_state.current_province}"],
         [""],
         ["方案说明："],
-        ["1. 典型出力曲线方案：按各时段平均发电量权重分配交易电量"],
-        ["2. 直线方案：风电24时段平均分配；光伏仅在有效发电时段平均分配（总电量与典型方案一致）"],
-        ["3. 日分解电量：月度时段电量 ÷ 当月天数，用于日常执行"],
+        ["方案一（典型曲线）：按各时段平均发电量权重分配市场化交易电量"],
+        [pv_desc],
         [""],
         [f"年度总交易电量（典型方案）：{round(total_annual, 2)} MWh"]
     ]
@@ -378,25 +431,43 @@ st.session_state.current_plant_type = st.sidebar.selectbox(
     key="sidebar_plant_type"
 )
 
-# 新增：光伏有效发电时段配置（仅光伏类型显示）
+# 光伏套利时段配置（仅光伏显示）
 if st.session_state.current_plant_type == "光伏":
-    st.sidebar.subheader("☀️ 光伏发电时段配置")
+    st.sidebar.subheader("☀️ 光伏套利曲线配置")
+    st.sidebar.write("核心时段（中午，接收电量）")
     col_pv1, col_pv2 = st.sidebar.columns(2)
     with col_pv1:
-        st.session_state.photovoltaic_start_hour = st.number_input(
-            "起始时段（点）", min_value=1, max_value=24,
-            value=st.session_state.photovoltaic_start_hour,
-            key="pv_start_hour"
+        st.session_state.pv_core_start = st.number_input(
+            "核心起始（点）", min_value=1, max_value=24,
+            value=st.session_state.pv_core_start, key="pv_core_start"
         )
     with col_pv2:
-        st.session_state.photovoltaic_end_hour = st.number_input(
-            "结束时段（点）", min_value=1, max_value=24,
-            value=st.session_state.photovoltaic_end_hour,
-            key="pv_end_hour"
+        st.session_state.pv_core_end = st.number_input(
+            "核心结束（点）", min_value=1, max_value=24,
+            value=st.session_state.pv_core_end, key="pv_core_end"
         )
-    # 显示当前有效时段
-    effective_hours = get_photovoltaic_effective_hours()
-    st.sidebar.info(f"当前有效发电时段：{effective_hours}点（共{len(effective_hours)}个时段）")
+    
+    st.sidebar.write("边缘时段（两端，转出电量）")
+    col_pv3, col_pv4 = st.sidebar.columns(2)
+    with col_pv3:
+        st.session_state.pv_edge_start = st.number_input(
+            "边缘起始（点）", min_value=1, max_value=24,
+            value=st.session_state.pv_edge_start, key="pv_edge_start"
+        )
+    with col_pv4:
+        st.session_state.pv_edge_end = st.number_input(
+            "边缘结束（点）", min_value=1, max_value=24,
+            value=st.session_state.pv_edge_end, key="pv_edge_end"
+        )
+    
+    # 显示时段划分
+    pv_hours = get_pv_arbitrage_hours()
+    st.sidebar.info(f"""
+    时段划分：
+    - 核心时段（接收）：{pv_hours['core']}点
+    - 边缘时段（转出）：{pv_hours['edge']}点
+    - 无效时段：{pv_hours['invalid']}点
+    """)
 
 # 4. 装机容量
 installed_capacity = st.sidebar.number_input(
@@ -465,11 +536,12 @@ if not st.session_state.auto_calculate:
 
 # -------------------------- 主页面内容 --------------------------
 st.title("⚡ 新能源电厂年度方案设计系统")
-pv_hours_display = f" | 光伏发电时段：{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else ""
+scheme2_title = "套利曲线（光伏）/直线曲线（风电）"
 st.subheader(
     f"当前配置：{st.session_state.current_year}年 | {st.session_state.current_region} | {st.session_state.current_province} | "
-    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}{pv_hours_display}"
+    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}"
 )
+st.caption(f"方案一：典型出力曲线 | 方案二：{scheme2_title}")
 
 # 一、模板导出与批量导入区域
 st.divider()
@@ -529,7 +601,7 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度方案
+# 2. 生成年度双方案
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
         if not st.session_state.selected_months or not st.session_state.monthly_data:
@@ -537,15 +609,16 @@ with col_data2:
         elif installed_capacity <= 0:
             st.warning("⚠️ 请填写装机容量")
         else:
-            with st.spinner("🔄 正在计算年度方案（含典型/直线双方案）..."):
+            with st.spinner("🔄 正在计算年度双方案..."):
                 try:
                     trade_typical = {}
-                    trade_linear = {}
+                    trade_arbitrage = {}
                     market_hours = {}
                     gen_hours = {}
                     total_annual = 0.0
                     
                     for month in st.session_state.selected_months:
+                        # 计算核心参数
                         if st.session_state.auto_calculate:
                             gh, mh = calculate_core_params_monthly(
                                 month, installed_capacity, power_limit_rate,
@@ -558,6 +631,7 @@ with col_data2:
                         market_hours[month] = mh
                         gen_hours[month] = gh
                         
+                        # 方案一：典型曲线
                         typical_df, total_typical = calculate_trade_power_typical(month, mh, installed_capacity)
                         if typical_df is None:
                             st.error(f"❌ 月份{month}典型方案计算失败")
@@ -565,14 +639,16 @@ with col_data2:
                         trade_typical[month] = typical_df
                         total_annual += total_typical
                         
-                        linear_df = calculate_trade_power_linear(month, total_typical)
-                        if linear_df is None:
-                            st.error(f"❌ 月份{month}直线方案计算失败")
+                        # 方案二：光伏套利/风电直线
+                        arbitrage_df = calculate_trade_power_arbitrage(month, total_typical, typical_df)
+                        if arbitrage_df is None:
+                            st.error(f"❌ 月份{month}方案二计算失败")
                             continue
-                        trade_linear[month] = linear_df
+                        trade_arbitrage[month] = arbitrage_df
                     
+                    # 保存到session_state
                     st.session_state.trade_power_typical = trade_typical
-                    st.session_state.trade_power_linear = trade_linear
+                    st.session_state.trade_power_arbitrage = trade_arbitrage
                     st.session_state.market_hours = market_hours
                     st.session_state.gen_hours = gen_hours
                     st.session_state.total_annual_trade = total_annual
@@ -591,15 +667,15 @@ with col_data3:
     if st.session_state.calculated and st.session_state.selected_months:
         annual_output = export_annual_plan()
         st.download_button(
-            "💾 导出年度方案（含双方案+日分解）",
+            "💾 导出年度方案（双方案+日分解）",
             data=annual_output,
-            file_name=f"{st.session_state.current_power_plant}_{st.session_state.current_year}年交易方案.xlsx",
+            file_name=f"{st.session_state.current_power_plant}_{st.session_state.current_year}年双方案交易数据.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
     else:
         st.button(
-            "💾 导出年度方案（含双方案+日分解）",
+            "💾 导出年度方案（双方案+日分解）",
             use_container_width=True,
             disabled=True,
             help="请先生成年度方案"
@@ -644,24 +720,24 @@ if st.session_state.calculated and st.session_state.selected_months:
     # 1. 年度汇总
     st.subheader("1. 年度汇总")
     summary_data = []
-    pv_hours_note = f"{st.session_state.photovoltaic_start_hour}-{st.session_state.photovoltaic_end_hour}点" if st.session_state.current_plant_type == "光伏" else "24小时"
+    scheme2_note = "套利曲线" if st.session_state.current_plant_type == "光伏" else "直线曲线"
     for month in st.session_state.selected_months:
-        typical_total = st.session_state.trade_power_typical[month]["市场化交易电量(MWh)"].sum()
-        linear_total = st.session_state.trade_power_linear[month]["市场化交易电量(MWh)"].sum()
+        typical_total = st.session_state.trade_power_typical[month]["方案一月度电量(MWh)"].sum()
+        arbitrage_total = st.session_state.trade_power_arbitrage[month]["方案二月度电量(MWh)"].sum()
         days = get_days_in_month(st.session_state.current_year, month)
         summary_data.append({
             "月份": f"{month}月",
             "月份天数": days,
             "市场化小时数": st.session_state.market_hours[month],
             "预估发电小时数": st.session_state.gen_hours[month],
-            "典型方案电量(MWh)": typical_total,
-            "直线方案电量(MWh)": linear_total,
-            "发电时段配置": pv_hours_note,
+            "方案一总电量(MWh)": typical_total,
+            "方案二总电量(MWh)": arbitrage_total,
+            "方案二类型": scheme2_note,
             "占年度比重(%)": round(typical_total / st.session_state.total_annual_trade * 100, 2)
         })
     summary_df = pd.DataFrame(summary_data)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    st.metric("年度总交易电量（典型方案）", f"{st.session_state.total_annual_trade:.2f} MWh")
+    st.metric("年度总交易电量（方案一）", f"{st.session_state.total_annual_trade:.2f} MWh")
     
     # 2. 月份方案详情
     st.subheader("2. 月份方案详情（双方案对比）")
@@ -671,64 +747,78 @@ if st.session_state.calculated and st.session_state.selected_months:
         key="view_month_select"
     )
     
-    # 典型方案展示
-    st.write(f"### 典型出力曲线方案（{view_month}月）")
-    typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
+    # 方案一展示
+    st.write(f"### 方案一：典型出力曲线（{view_month}月）")
+    typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案一月度电量(MWh)"]].copy()
     typical_df = typical_df.fillna(0.0)
-    typical_df["市场化交易电量(MWh)"] = typical_df["市场化交易电量(MWh)"].astype(np.float64)
+    typical_df["方案一月度电量(MWh)"] = typical_df["方案一月度电量(MWh)"].astype(np.float64)
     typical_df = typical_df.reset_index(drop=True)
     st.dataframe(typical_df, use_container_width=True, hide_index=True)
     
     try:
-        chart_data = typical_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
-        if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
-            st.write(f"#### {view_month}月典型方案电量分布")
+        chart_data = typical_df[["时段", "方案一月度电量(MWh)"]].set_index("时段")
+        if not chart_data.empty and chart_data["方案一月度电量(MWh)"].sum() > 0:
+            st.write(f"#### {view_month}月方案一电量分布")
             st.bar_chart(chart_data, use_container_width=True)
         else:
             st.info("⚠️ 暂无有效数据生成图表")
     except Exception as e:
-        st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
+        st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
     
-    # 直线方案展示（新增光伏时段说明）
-    st.write(f"### 直线方案（{view_month}月）")
-    linear_df = st.session_state.trade_power_linear[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
-    linear_df = linear_df.fillna(0.0)
-    linear_df["市场化交易电量(MWh)"] = linear_df["市场化交易电量(MWh)"].astype(np.float64)
-    linear_df = linear_df.reset_index(drop=True)
-    st.dataframe(linear_df, use_container_width=True, hide_index=True)
+    # 方案二展示
+    st.write(f"### 方案二：{scheme2_note}（{view_month}月）")
+    arbitrage_df = st.session_state.trade_power_arbitrage[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案二月度电量(MWh)"]].copy()
+    arbitrage_df = arbitrage_df.fillna(0.0)
+    arbitrage_df["方案二月度电量(MWh)"] = arbitrage_df["方案二月度电量(MWh)"].astype(np.float64)
+    arbitrage_df = arbitrage_df.reset_index(drop=True)
+    st.dataframe(arbitrage_df, use_container_width=True, hide_index=True)
     
-    # 直线方案说明
+    # 方案二说明
     if st.session_state.current_plant_type == "光伏":
-        effective_hours = get_photovoltaic_effective_hours()
-        st.info(f"注：光伏直线方案仅在{effective_hours}点（共{len(effective_hours)}个时段）分配电量，总电量={linear_df['市场化交易电量(MWh)'].sum():.2f} MWh，有效时段平均电量={linear_df['市场化交易电量(MWh)'].max():.2f} MWh/时段")
+        pv_hours = get_pv_arbitrage_hours()
+        edge_total = typical_df[typical_df["时段"].isin(pv_hours["edge"])]["方案一月度电量(MWh)"].sum()
+        core_avg_add = edge_total / len(pv_hours["core"]) if len(pv_hours["core"]) > 0 else 0
+        st.info(f"""
+        光伏套利曲线说明：
+        - 转出时段：{pv_hours['edge']}点（总转出电量={edge_total:.2f} MWh）
+        - 接收时段：{pv_hours['core']}点（每时段增加={core_avg_add:.2f} MWh）
+        - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
+        """)
     else:
-        st.info(f"注：风电直线方案24时段平均分配，总电量={linear_df['市场化交易电量(MWh)'].sum():.2f} MWh，平均电量={linear_df['市场化交易电量(MWh)'].iloc[0]:.2f} MWh/时段")
+        st.info(f"""
+        风电直线曲线说明：
+        - 24时段平均分配，每时段电量={arbitrage_df['方案二月度电量(MWh)'].iloc[0]:.2f} MWh
+        - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
+        """)
     
     try:
-        chart_data = linear_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
-        if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
-            st.write(f"#### {view_month}月直线方案电量分布")
+        chart_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].set_index("时段")
+        if not chart_data.empty and chart_data["方案二月度电量(MWh)"].sum() > 0:
+            st.write(f"#### {view_month}月方案二电量分布")
             st.bar_chart(chart_data, use_container_width=True)
         else:
             st.info("⚠️ 暂无有效数据生成图表")
     except Exception as e:
-        st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
+        st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
     
-    # 3. 日分解展示
-    st.subheader(f"3. {view_month}月日分解电量（按天数平均）")
-    typical_daily = decompose_to_daily(st.session_state.trade_power_typical[view_month], st.session_state.current_year, view_month)
-    linear_daily = decompose_to_daily(st.session_state.trade_power_linear[view_month], st.session_state.current_year, view_month)
-    
-    daily_compare = pd.DataFrame({
-        "时段": typical_daily["时段"],
-        "典型方案日电量(MWh)": typical_daily["每日时段电量(MWh)"],
-        "直线方案日电量(MWh)": linear_daily["每日时段电量(MWh)"],
-        "月份天数": typical_daily["月份天数"]
-    })
-    daily_compare = daily_compare.fillna(0.0)
-    st.dataframe(daily_compare, use_container_width=True, hide_index=True)
-    st.info(f"注：日电量 = 月度时段电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）")
+    # 3. 双方案日分解展示（四列数据）
+    st.subheader(f"3. {view_month}月双方案日分解电量（四列数据）")
+    decompose_df = decompose_double_scheme(
+        st.session_state.trade_power_typical[view_month],
+        st.session_state.trade_power_arbitrage[view_month],
+        st.session_state.current_year,
+        view_month
+    )
+    decompose_df = decompose_df.fillna(0.0)
+    # 显示四列核心数据
+    display_df = decompose_df[["时段", "方案一月度电量(MWh)", "方案一日分解电量(MWh)", "方案二月度电量(MWh)", "方案二日分解电量(MWh)"]].copy()
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.info(f"""
+    日分解说明：
+    - 日分解电量 = 月度电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）
+    - 方案一/二月度总电量保持一致，日分解电量同步匹配
+    """)
 
 # 页脚
 st.divider()
-st.caption(f"© {st.session_state.current_year} 新能源电厂年度方案设计系统 | 风电24小时/光伏时段化直线方案 | 双方案对比导出")
+st.caption(f"© {st.session_state.current_year} 新能源电厂年度方案设计系统 | 双方案（典型/套利/直线）+ 四列日分解数据 | 总量一致")
