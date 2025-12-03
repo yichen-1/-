@@ -550,8 +550,14 @@ if st.session_state.calculated and st.session_state.trade_power_data is not None
             st.metric("校准状态", "⚠️ 未匹配", delta=f"{diff:.2f}")
     with col_status3:
         spot_price_list = st.session_state.current_24h_data["现货价格(元/MWh)"].tolist()
+        if sum(spot_price_list) <= 0:
+            # 兼容全0的情况
+            st.metric("最高电价时段", "无有效电价", value="0.00元/MWh")
+        else:
         max_price_hour = spot_price_list.index(max(spot_price_list)) + 1
-        st.metric("最高电价时段", f"{max_price_hour}时", value=f"{max(spot_price_list):.2f}元/MWh")
+        max_price = max(spot_price_list)
+        # 正确格式：label, value, delta（delta可选）
+        st.metric("最高电价时段", f"{max_price_hour}时", delta=f"{max_price:.2f}元/MWh")
 
     # 对比展示
     st.subheader("📊 调整前后对比")
