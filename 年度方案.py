@@ -23,8 +23,10 @@ if "current_month" not in st.session_state:
     st.session_state.current_month = 1
 if "current_site" not in st.session_state:
     st.session_state.current_site = ""
+if "trade_power_data" not in st.session_state:
+    st.session_state.trade_power_data = None  # 存储交易电量分配结果
 
-# 重新定义区域-省份字典（核心调整：内蒙古电网为顶级区域，蒙西在其下）
+# 重新定义区域-省份字典
 REGIONS = {
     "总部": ["北京"],
     "华北": ["首都", "河北", "冀北", "山东", "山西", "天津"],
@@ -34,13 +36,13 @@ REGIONS = {
     "西北": ["甘肃", "宁夏", "青海", "陕西", "新疆"],
     "西南": ["重庆", "四川", "西藏"],
     "南方": ["广东", "广西", "云南", "海南", "贵州"],
-    "内蒙古电网": ["蒙西"]  # 提升为顶级区域，包含蒙西子选项
+    "内蒙古电网": ["蒙西"]  # 顶级区域，包含蒙西子选项
 }
 
 # 月份列表
 MONTHS = list(range(1, 13))
 
-# -------------------------- 工具函数 --------------------------
+# -------------------------- 核心计算函数 --------------------------
 def init_24h_data():
     """初始化24时段数据模板"""
     hours = list(range(1, 25))
@@ -59,11 +61,54 @@ def calculate_generation_hours(total_generation, installed_capacity):
         return 0.0
     return round(total_generation / installed_capacity, 2)
 
-def save_data_to_file(province, month, site_name, data):
-    """保存数据到CSV文件"""
-    # 创建保存目录（按省份+场站分层）
+def calculate_trade_power_distribution(avg_generation_24h, market_hours, installed_capacity):
+    """
+    计算24时段市场化交易电量分配
+    :param avg_generation_24h: 24时段平均发电量列表
+    :param market_hours: 市场化交易小时数
+    :param installed_capacity: 装机容量(MW)
+    :return: 包含时段、比重、交易电量的DataFrame
+    """
+    # 计算市场化交易总电量（小时数 × 装机容量 = MWh）
+    total_trade_power = market_hours * installed_capacity
+    
+    # 计算24时段平均发电量总和
+    total_avg_generation = sum(avg_generation_24h)
+    
+    # 边界条件处理
+    if installed_capacity <= 0:
+        raise ValueError("装机容量必须大于0")
+    if market_hours <= 0:
+        raise ValueError("市场化交易小时数必须大于0")
+    if total_avg_generation <= 0:
+        raise ValueError("24时段平均发电量总和必须大于0（请先填写平均发电量数据）")
+    
+    # 计算各时段比重和交易电量
+    trade_power_data = []
+    for hour, avg_gen in enumerate(avg_generation_24h, 1):
+        proportion = avg_gen / total_avg_generation  # 该时段比重
+        trade_power = total_trade_power * proportion  # 该时段交易电量
+        trade_power_data.append({
+            "时段": hour,
+            "平均发电量(MWh)": avg_gen,
+            "时段比重(%)": round(proportion * 100, 4),
+            "市场化交易电量(MWh)": round(trade_power, 2)
+        })
+    
+    return pd.DataFrame(trade_power_data), round(total_trade_power, 2)
+
+def save_data_to_file(province, month, site_name, data, trade_power_data=None):
+    """保存数据到CSV文件（包含交易电量数据）"""
+    # 创建保存目录
     save_dir = f"./新能源场站数据/{province}/{site_name}"
     os.makedirs(save_dir, exist_ok=True)
+    
+    # 整合交易电量数据
+    if trade_power_data is not None:
+        # 合并基础数据和交易电量数据
+        merge_key = "时段"
+        data = pd.merge(data, trade_power_data[["时段", "时段比重(%)", "市场化交易电量(MWh)"]], 
+                        on=merge_key, how="left")
     
     # 生成文件名
     filename = f"{month}月数据.csv"
@@ -83,7 +128,7 @@ def load_data_from_file(province, month, site_name):
 # -------------------------- 侧边栏配置 --------------------------
 st.sidebar.header("⚙️ 基础信息配置")
 
-# 区域选择（包含内蒙古电网顶级选项）
+# 区域选择
 st.session_state.current_region = st.sidebar.selectbox(
     "选择区域",
     list(REGIONS.keys()),
@@ -94,15 +139,15 @@ st.session_state.current_region = st.sidebar.selectbox(
 # 获取当前区域的省份/地区列表
 current_province_list = REGIONS[st.session_state.current_region]
 
-# 自动匹配初始省份（修复索引错误核心逻辑）
+# 自动匹配初始省份
 if not st.session_state.current_province or st.session_state.current_province not in current_province_list:
-    st.session_state.current_province = current_province_list[0]  # 默认选中第一个
+    st.session_state.current_province = current_province_list[0]
 
-# 省份/地区选择（安全的索引处理）
+# 省份/地区选择
 st.session_state.current_province = st.sidebar.selectbox(
     "选择省份/地区",
     current_province_list,
-    index=current_province_list.index(st.session_state.current_province),  # 此时值一定在列表中
+    index=current_province_list.index(st.session_state.current_province),
     key="province_select"
 )
 
@@ -172,7 +217,7 @@ st.title("⚡ 新能源场站年度方案设计系统")
 st.subheader(f"当前配置：{st.session_state.current_region} | {st.session_state.current_province} | {st.session_state.current_month}月 | {st.session_state.current_site}")
 
 # 数据操作区域
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     init_btn = st.button("📋 初始化24时段数据模板", use_container_width=True)
@@ -186,10 +231,13 @@ with col3:
     save_btn = st.button("💾 保存当前数据", use_container_width=True)
 with col4:
     load_btn = st.button("📥 加载历史数据", use_container_width=True)
+with col5:
+    generate_plan_btn = st.button("📝 生成年度交易方案", use_container_width=True, type="primary")
 
 # 初始化数据
 if init_btn:
     st.session_state.current_24h_data = init_24h_data()
+    st.session_state.trade_power_data = None  # 重置交易电量数据
 elif "current_24h_data" not in st.session_state:
     st.session_state.current_24h_data = init_24h_data()
 
@@ -205,6 +253,7 @@ if import_btn is not None:
         required_cols = ["时段", "平均发电量(MWh)", "当月各时段累计发电量(MWh)", "现货价格(元/MWh)", "中长期价格(元/MWh)"]
         if all(col in df.columns for col in required_cols) and len(df) == 24:
             st.session_state.current_24h_data = df
+            st.session_state.trade_power_data = None  # 重置交易电量数据
             st.success("✅ 数据导入成功！")
         else:
             st.error("❌ 导入文件格式错误，请检查列名和数据行数（必须包含24时段）")
@@ -223,13 +272,17 @@ if load_btn:
         )
         if loaded_data is not None:
             st.session_state.current_24h_data = loaded_data
+            # 提取历史交易电量数据
+            if "市场化交易电量(MWh)" in loaded_data.columns:
+                trade_power_cols = ["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]
+                st.session_state.trade_power_data = loaded_data[trade_power_cols].copy()
             st.success("✅ 历史数据加载成功！")
         else:
             st.warning("⚠️ 未找到该场站的历史数据")
 
 # 24时段数据编辑区域
 st.divider()
-st.header("📊 24时段数据编辑")
+st.header("📊 24时段基础数据编辑")
 
 # 数据编辑表格
 edited_df = st.data_editor(
@@ -248,9 +301,70 @@ edited_df = st.data_editor(
 # 更新会话状态中的数据
 st.session_state.current_24h_data = edited_df
 
+# -------------------------- 生成年度交易方案 --------------------------
+if generate_plan_btn:
+    try:
+        # 获取24时段平均发电量数据
+        avg_generation_list = edited_df["平均发电量(MWh)"].tolist()
+        
+        # 计算交易电量分配
+        trade_power_df, total_trade_power = calculate_trade_power_distribution(
+            avg_generation_list,
+            market_hours,
+            installed_capacity
+        )
+        
+        # 保存到会话状态
+        st.session_state.trade_power_data = trade_power_df
+        
+        # 展示生成结果
+        st.divider()
+        st.header("📈 市场化交易电量分配结果")
+        
+        # 总览信息
+        overview_col1, overview_col2, overview_col3, overview_col4 = st.columns(4)
+        with overview_col1:
+            st.metric("装机容量(MW)", f"{installed_capacity:.1f}")
+        with overview_col2:
+            st.metric("市场化交易小时数", f"{market_hours:.2f}")
+        with overview_col3:
+            st.metric("市场化交易总电量(MWh)", f"{total_trade_power:.2f}")
+        with overview_col4:
+            st.metric("24时段电量分配误差", f"{round(sum(trade_power_df['市场化交易电量(MWh)']) - total_trade_power, 4):.4f}")
+        
+        # 展示24时段分配详情
+        st.subheader("24时段交易电量分配详情")
+        st.dataframe(
+            trade_power_df,
+            column_config={
+                "时段": st.column_config.NumberColumn("时段", disabled=True),
+                "平均发电量(MWh)": st.column_config.NumberColumn("平均发电量(MWh)", disabled=True),
+                "时段比重(%)": st.column_config.NumberColumn("时段比重(%)", disabled=True, format="%.4f"),
+                "市场化交易电量(MWh)": st.column_config.NumberColumn("市场化交易电量(MWh)", disabled=True, format="%.2f")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # 可视化展示
+        st.subheader("时段比重分布")
+        st.bar_chart(
+            trade_power_df.set_index("时段")["时段比重(%)"],
+            use_container_width=True,
+            y_label="比重(%)",
+            x_label="时段"
+        )
+        
+        st.success(f"✅ 年度交易方案生成成功！总交易电量：{total_trade_power:.2f} MWh")
+        
+    except ValueError as e:
+        st.error(f"❌ 生成方案失败：{str(e)}")
+    except Exception as e:
+        st.error(f"❌ 生成方案失败：未知错误 - {str(e)}")
+
 # -------------------------- 数据计算与展示 --------------------------
 st.divider()
-st.header("📈 关键指标计算")
+st.header("📊 关键指标计算")
 
 # 计算总发电量
 total_generation = edited_df["当月各时段累计发电量(MWh)"].sum()
@@ -309,13 +423,14 @@ if save_btn:
         final_data["市场化交易小时数"] = market_hours
         final_data["保存时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # 保存到文件
+        # 保存到文件（包含交易电量数据）
         try:
             filepath = save_data_to_file(
                 st.session_state.current_province,
                 st.session_state.current_month,
                 st.session_state.current_site,
-                final_data
+                final_data,
+                st.session_state.trade_power_data
             )
             # 保存到会话状态
             key = f"{st.session_state.current_region}_{st.session_state.current_province}_{st.session_state.current_month}_{st.session_state.current_site}"
@@ -329,12 +444,11 @@ if save_btn:
 st.divider()
 st.header("🗂️ 历史数据查询")
 
-# 数据查询区域（匹配新的区域-省份层级）
+# 数据查询区域
 query_col1, query_col2, query_col3, query_col4 = st.columns(4)
 with query_col1:
     query_region = st.selectbox("查询区域", list(REGIONS.keys()), key="query_region")
 with query_col2:
-    # 查询省份也做安全处理
     query_province_list = REGIONS[query_region]
     query_province = st.selectbox("查询省份/地区", query_province_list, key="query_province")
 with query_col3:
@@ -367,6 +481,12 @@ if query_btn:
                 st.metric("装机容量(MW)", f"{query_installed_cap:.1f}")
             with q_col3:
                 st.metric("发电小时数", f"{query_gen_hours:.2f}")
+            
+            # 展示交易电量数据（如果有）
+            if "市场化交易电量(MWh)" in query_data.columns:
+                st.subheader("市场化交易电量分配")
+                trade_cols = ["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]
+                st.dataframe(query_data[trade_cols], use_container_width=True, hide_index=True)
         else:
             st.info("ℹ️ 未查询到该条件下的历史数据")
 
