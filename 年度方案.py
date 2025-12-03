@@ -12,32 +12,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State
-def init_session_state():
-    default_states = {
-        "site_data": {},
-        "current_region": "总部",
-        "current_province": "",
-        "current_month": 1,
-        "current_site": "",
-        "trade_power_data": None,       # 初始分配数据
-        "adjusted_trade_power": None,   # 调整后的数据
-        "total_trade_power": 0.0,       # 锁定的总交易电量
-        "mechanism_mode": "小时数",
-        "guaranteed_mode": "小时数",
-        "manual_market_hours": 0.0,
-        "auto_calculate": True,
-        "current_24h_data": init_24h_data()
-    }
-    for key, value in default_states.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-# 核心工具函数
-def init_24h_data():
-    """初始化24时段数据模板"""
+# 初始化Session State（仅初始化一次）
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state.site_data = {}
+    st.session_state.current_region = "总部"
+    st.session_state.current_province = ""
+    st.session_state.current_month = 1
+    st.session_state.current_site = ""
+    st.session_state.trade_power_data = None       # 初始分配数据
+    st.session_state.adjusted_trade_power = None   # 调整后的数据
+    st.session_state.total_trade_power = 0.0       # 锁定的总交易电量
+    st.session_state.mechanism_mode = "小时数"
+    st.session_state.guaranteed_mode = "小时数"
+    st.session_state.manual_market_hours = 0.0
+    st.session_state.auto_calculate = True
+    st.session_state.calculated = False            # 是否已计算过核心参数
+    st.session_state.market_hours = 0.0            # 缓存市场化小时数
+    st.session_state.gen_hours = 0.0               # 缓存预估发电小时数
+    
+    # 初始化24小时数据
     hours = list(range(1, 25))
-    return pd.DataFrame({
+    st.session_state.current_24h_data = pd.DataFrame({
         "时段": hours,
         "平均发电量(MWh)": [0.0]*24,
         "当月各时段累计发电量(MWh)": [0.0]*24,
@@ -45,32 +41,33 @@ def init_24h_data():
         "中长期价格(元/MWh)": [0.0]*24
     })
 
-def calculate_generation_hours(total_generation, installed_capacity):
-    """计算预估当月发电小时数"""
-    return round(total_generation / installed_capacity, 2) if installed_capacity > 0 else 0.0
-
-def calculate_market_hours(
-    gen_hours, power_limit_rate, 
-    mechanism_value, mechanism_mode,
-    guaranteed_value, guaranteed_mode
-):
-    """自动计算市场化交易小时数"""
+# -------------------------- 核心工具函数 --------------------------
+def calculate_core_params(installed_capacity, power_limit_rate, mechanism_value, mechanism_mode, 
+                         guaranteed_value, guaranteed_mode):
+    """统一计算核心参数（仅在点击按钮时执行）"""
+    # 计算预估发电小时数
+    total_generation = st.session_state.current_24h_data["当月各时段累计发电量(MWh)"].sum()
+    gen_hours = round(total_generation / installed_capacity, 2) if installed_capacity > 0 else 0.0
+    
+    # 计算市场化交易小时数
     if gen_hours <= 0:
-        return 0.0
-    
-    available_hours = gen_hours * (1 - power_limit_rate / 100)
-    
-    if mechanism_mode == "小时数":
-        available_hours -= mechanism_value
+        market_hours = 0.0
     else:
-        available_hours -= gen_hours * (mechanism_value / 100)
+        available_hours = gen_hours * (1 - power_limit_rate / 100)
+        
+        if mechanism_mode == "小时数":
+            available_hours -= mechanism_value
+        else:
+            available_hours -= gen_hours * (mechanism_value / 100)
+        
+        if guaranteed_mode == "小时数":
+            available_hours -= guaranteed_value
+        else:
+            available_hours -= gen_hours * (guaranteed_value / 100)
+        
+        market_hours = max(round(available_hours, 2), 0.0)
     
-    if guaranteed_mode == "小时数":
-        available_hours -= guaranteed_value
-    else:
-        available_hours -= gen_hours * (guaranteed_value / 100)
-    
-    return max(round(available_hours, 2), 0.0)
+    return gen_hours, market_hours
 
 def calculate_trade_power_distribution(avg_generation_24h, market_hours, installed_capacity):
     """计算初始24时段市场化交易电量分配"""
@@ -94,63 +91,43 @@ def calculate_trade_power_distribution(avg_generation_24h, market_hours, install
     return pd.DataFrame(trade_power_data), round(total_trade_power, 2)
 
 def adjust_trade_power_by_price(trade_power_df, spot_price_24h, total_trade_power):
-    """
-    按现货电价智能调整交易电量（电价越高，分配越多）
-    :param trade_power_df: 初始分配数据
-    :param spot_price_24h: 24时段现货电价列表
-    :param total_trade_power: 锁定的总交易电量
-    :return: 调整后的交易电量数据
-    """
-    # 处理电价为0的情况（避免权重为0）
+    """按现货电价智能调整交易电量"""
     spot_price_24h = [max(p, 0.01) for p in spot_price_24h]
-    
-    # 计算电价权重（归一化）
     total_price = sum(spot_price_24h)
     price_weights = [p / total_price for p in spot_price_24h]
     
-    # 按电价权重重新分配电量
     adjusted_data = trade_power_df.copy()
     for idx, weight in enumerate(price_weights):
         adjusted_data.loc[idx, "市场化交易电量(MWh)"] = round(total_trade_power * weight, 2)
         adjusted_data.loc[idx, "时段比重(%)"] = round(weight * 100, 4)
     
-    # 校准总和（确保等于总交易电量）
+    # 校准总和
     sum_adjusted = adjusted_data["市场化交易电量(MWh)"].sum()
     diff = total_trade_power - sum_adjusted
     if abs(diff) > 0.01:
-        # 差值分摊到电价最高的时段
         max_price_idx = spot_price_24h.index(max(spot_price_24h))
         adjusted_data.loc[max_price_idx, "市场化交易电量(MWh)"] += round(diff, 2)
     
     return adjusted_data
 
 def calibrate_trade_power(adjusted_df, total_trade_power):
-    """
-    校准交易电量（确保总和等于锁定的总交易电量）
-    :param adjusted_df: 手动调整后的DataFrame
-    :param total_trade_power: 锁定的总交易电量
-    :return: 校准后的DataFrame
-    """
+    """校准交易电量总和"""
     calibrated_df = adjusted_df.copy()
     current_sum = calibrated_df["市场化交易电量(MWh)"].sum()
     diff = total_trade_power - current_sum
     
-    # 如果差值过小，直接返回
     if abs(diff) <= 0.01:
         return calibrated_df
     
-    # 按比例分摊差值（避免个别时段为负）
     positive_mask = calibrated_df["市场化交易电量(MWh)"] > 0
     positive_qty = calibrated_df.loc[positive_mask, "市场化交易电量(MWh)"]
     total_positive = positive_qty.sum()
     
     if total_positive <= 0:
-        # 所有时段都是0，平均分配
         avg_qty = total_trade_power / 24
         calibrated_df["市场化交易电量(MWh)"] = round(avg_qty, 2)
         calibrated_df["时段比重(%)"] = round((avg_qty / total_trade_power) * 100, 4)
     else:
-        # 按比例调整
         for idx in calibrated_df.index:
             if positive_mask[idx]:
                 ratio = calibrated_df.loc[idx, "市场化交易电量(MWh)"] / total_positive
@@ -158,17 +135,15 @@ def calibrate_trade_power(adjusted_df, total_trade_power):
                 calibrated_df.loc[idx, "市场化交易电量(MWh)"] = max(0.0, calibrated_df.loc[idx, "市场化交易电量(MWh)"])
                 calibrated_df.loc[idx, "时段比重(%)"] = round((calibrated_df.loc[idx, "市场化交易电量(MWh)"] / total_trade_power) * 100, 4)
     
-    # 最终校准（确保总和精确匹配）
     final_diff = total_trade_power - calibrated_df["市场化交易电量(MWh)"].sum()
     if abs(final_diff) > 0.01:
-        # 调整第一个非零时段
         non_zero_idx = calibrated_df[calibrated_df["市场化交易电量(MWh)"] > 0].index[0]
         calibrated_df.loc[non_zero_idx, "市场化交易电量(MWh)"] += round(final_diff, 2)
     
     return calibrated_df
 
-def save_data_to_file(province, month, site_name, data, trade_power_data=None):
-    """保存数据到CSV文件（包含调整后的数据）"""
+def save_data_to_file(province, month, site_name, data, trade_power_data=None, total_trade_power=0.0):
+    """保存数据到CSV文件"""
     save_dir = f"./新能源场站数据/{province}/{site_name}"
     os.makedirs(save_dir, exist_ok=True)
     
@@ -189,10 +164,7 @@ def load_data_from_file(province, month, site_name):
     filepath = f"./新能源场站数据/{province}/{site_name}/{month}月数据.csv"
     return pd.read_csv(filepath, encoding="utf-8-sig") if os.path.exists(filepath) else None
 
-# -------------------------- 执行初始化 --------------------------
-init_session_state()
-
-# 区域-省份字典
+# -------------------------- 区域-省份字典 --------------------------
 REGIONS = {
     "总部": ["北京"],
     "华北": ["首都", "河北", "冀北", "山东", "山西", "天津"],
@@ -207,10 +179,10 @@ REGIONS = {
 
 MONTHS = list(range(1, 13))
 
-# -------------------------- 侧边栏配置 --------------------------
+# -------------------------- 侧边栏配置（无实时计算） --------------------------
 st.sidebar.header("⚙️ 基础信息配置")
 
-# 1. 区域/省份/月份/场站/装机容量
+# 1. 基础信息（仅更新状态，不计算）
 selected_region = st.sidebar.selectbox(
     "选择区域", list(REGIONS.keys()),
     index=list(REGIONS.keys()).index(st.session_state.current_region),
@@ -247,7 +219,7 @@ installed_capacity = st.sidebar.number_input(
     key="sidebar_installed_capacity", help="场站总装机容量，单位：兆瓦"
 )
 
-# 2. 电量参数配置
+# 2. 电量参数配置（仅更新状态，不计算）
 st.sidebar.subheader("⚡ 电量参数配置")
 
 # 机制电量
@@ -294,7 +266,7 @@ power_limit_rate = st.sidebar.number_input(
     key="sidebar_power_limit_rate", help="场站当月限电比例，0-100%"
 )
 
-# 市场化交易小时数
+# 市场化交易小时数（仅显示，不实时计算）
 st.sidebar.write("#### 市场化交易小时数")
 auto_calculate = st.sidebar.toggle(
     "自动计算", value=st.session_state.auto_calculate,
@@ -302,27 +274,24 @@ auto_calculate = st.sidebar.toggle(
 )
 st.session_state.auto_calculate = auto_calculate
 
-# 计算市场化小时数
-total_generation = st.session_state.current_24h_data["当月各时段累计发电量(MWh)"].sum()
-gen_hours = calculate_generation_hours(total_generation, installed_capacity)
-
 if st.session_state.auto_calculate:
-    market_hours = calculate_market_hours(
-        gen_hours, power_limit_rate,
-        mechanism_value, st.session_state.mechanism_mode,
-        guaranteed_value, st.session_state.guaranteed_mode
-    )
+    # 显示缓存的计算结果（无实时计算）
     st.sidebar.number_input(
-        "计算结果", value=market_hours, step=0.1, disabled=True,
-        key="sidebar_market_hours_auto", min_value=0.0, max_value=1000000.0
+        "计算结果（点击生成方案后更新）",
+        value=st.session_state.market_hours,
+        step=0.1,
+        disabled=True,
+        key="sidebar_market_hours_auto",
+        min_value=0.0,
+        max_value=1000000.0
     )
 else:
-    market_hours = st.sidebar.number_input(
+    manual_market_hours = st.sidebar.number_input(
         "手动输入", min_value=0.0, max_value=1000000.0,
         value=st.session_state.manual_market_hours, step=0.1,
         key="sidebar_market_hours_manual"
     )
-    st.session_state.manual_market_hours = market_hours
+    st.session_state.manual_market_hours = manual_market_hours
 
 # -------------------------- 主页面内容 --------------------------
 st.title("⚡ 新能源场站年度方案设计系统")
@@ -331,15 +300,23 @@ st.subheader(
     f"{st.session_state.current_month}月 | {st.session_state.current_site}"
 )
 
-# 数据操作按钮
+# 数据操作按钮（核心：仅按钮触发计算/刷新）
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     if st.button("📋 初始化24时段数据模板", use_container_width=True, key="main_init_btn"):
-        st.session_state.current_24h_data = init_24h_data()
+        hours = list(range(1, 25))
+        st.session_state.current_24h_data = pd.DataFrame({
+            "时段": hours,
+            "平均发电量(MWh)": [0.0]*24,
+            "当月各时段累计发电量(MWh)": [0.0]*24,
+            "现货价格(元/MWh)": [0.0]*24,
+            "中长期价格(元/MWh)": [0.0]*24
+        })
         st.session_state.trade_power_data = None
         st.session_state.adjusted_trade_power = None
         st.session_state.total_trade_power = 0.0
-        st.rerun()
+        st.session_state.calculated = False
+        st.success("✅ 已初始化24时段数据模板！")
 
 with col2:
     import_btn = st.file_uploader(
@@ -354,8 +331,8 @@ with col2:
                 st.session_state.trade_power_data = None
                 st.session_state.adjusted_trade_power = None
                 st.session_state.total_trade_power = 0.0
+                st.session_state.calculated = False
                 st.success("✅ 数据导入成功！")
-                st.rerun()
             else:
                 st.error("❌ 导入文件格式错误，请检查列名和24时段数据")
         except Exception as e:
@@ -367,7 +344,6 @@ with col3:
             st.warning("⚠️ 请完善省份、场站名称、装机容量信息")
         else:
             final_data = st.session_state.current_24h_data.copy()
-            # 优先使用调整后的数据
             trade_power_data = st.session_state.adjusted_trade_power if st.session_state.adjusted_trade_power is not None else st.session_state.trade_power_data
             
             # 添加元数据
@@ -376,13 +352,13 @@ with col3:
             final_data["月份"] = st.session_state.current_month
             final_data["场站名称"] = st.session_state.current_site
             final_data["装机容量(MW)"] = installed_capacity
-            final_data["预估发电小时数"] = gen_hours
+            final_data["预估发电小时数"] = st.session_state.gen_hours
             final_data["机制电量模式"] = st.session_state.mechanism_mode
             final_data["机制电量值"] = mechanism_value
             final_data["保障性电量模式"] = st.session_state.guaranteed_mode
             final_data["保障性电量值"] = guaranteed_value
             final_data["限电率(%)"] = power_limit_rate
-            final_data["市场化交易小时数"] = market_hours
+            final_data["市场化交易小时数"] = st.session_state.market_hours if st.session_state.auto_calculate else st.session_state.manual_market_hours
             final_data["总交易电量(MWh)"] = st.session_state.total_trade_power
             final_data["保存时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -392,7 +368,8 @@ with col3:
                     st.session_state.current_month,
                     st.session_state.current_site,
                     final_data,
-                    trade_power_data
+                    trade_power_data,
+                    st.session_state.total_trade_power
                 )
                 st.success(f"✅ 数据保存成功！文件路径：{filepath}")
             except Exception as e:
@@ -410,42 +387,57 @@ with col4:
             )
             if loaded_data is not None:
                 st.session_state.current_24h_data = loaded_data
-                # 提取交易电量数据
                 if "市场化交易电量(MWh)" in loaded_data.columns:
                     trade_power_cols = ["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]
                     st.session_state.trade_power_data = loaded_data[trade_power_cols].copy()
                     st.session_state.adjusted_trade_power = st.session_state.trade_power_data.copy()
-                    # 提取总交易电量
                     if "总交易电量(MWh)" in loaded_data.columns:
                         st.session_state.total_trade_power = loaded_data["总交易电量(MWh)"].iloc[0]
                     else:
                         st.session_state.total_trade_power = loaded_data["市场化交易电量(MWh)"].sum()
                 st.success("✅ 历史数据加载成功！")
-                st.rerun()
             else:
                 st.warning("⚠️ 未找到该场站的历史数据")
 
 with col5:
     if st.button("📝 生成初始交易方案", use_container_width=True, type="primary", key="main_generate_btn"):
-        try:
-            avg_generation_list = st.session_state.current_24h_data["平均发电量(MWh)"].tolist()
-            trade_power_df, total_trade_power = calculate_trade_power_distribution(
-                avg_generation_list, market_hours, installed_capacity
-            )
-            # 保存初始数据和总电量（锁定）
-            st.session_state.trade_power_data = trade_power_df
-            st.session_state.total_trade_power = total_trade_power
-            st.session_state.adjusted_trade_power = None  # 重置调整后的数据
-            
-            st.success(f"✅ 初始交易方案生成成功！总交易电量（锁定）：{total_trade_power:.2f} MWh")
-            st.rerun()
-            
-        except ValueError as e:
-            st.error(f"❌ 生成方案失败：{str(e)}")
-        except Exception as e:
-            st.error(f"❌ 生成方案失败：未知错误 - {str(e)}")
+        # 显示加载状态
+        with st.spinner("🔢 正在计算交易方案，请稍候..."):
+            try:
+                # 第一步：计算核心参数（仅此时计算）
+                if st.session_state.auto_calculate:
+                    gen_hours, market_hours = calculate_core_params(
+                        installed_capacity, power_limit_rate,
+                        mechanism_value, st.session_state.mechanism_mode,
+                        guaranteed_value, st.session_state.guaranteed_mode
+                    )
+                    st.session_state.gen_hours = gen_hours
+                    st.session_state.market_hours = market_hours
+                else:
+                    market_hours = st.session_state.manual_market_hours
+                    total_generation = st.session_state.current_24h_data["当月各时段累计发电量(MWh)"].sum()
+                    st.session_state.gen_hours = round(total_generation / installed_capacity, 2) if installed_capacity > 0 else 0.0
+                
+                # 第二步：计算初始交易电量分配
+                avg_generation_list = st.session_state.current_24h_data["平均发电量(MWh)"].tolist()
+                trade_power_df, total_trade_power = calculate_trade_power_distribution(
+                    avg_generation_list, market_hours, installed_capacity
+                )
+                
+                # 保存计算结果
+                st.session_state.trade_power_data = trade_power_df
+                st.session_state.total_trade_power = total_trade_power
+                st.session_state.adjusted_trade_power = None
+                st.session_state.calculated = True
+                
+                st.success(f"✅ 初始交易方案生成成功！总交易电量：{total_trade_power:.2f} MWh")
+                
+            except ValueError as e:
+                st.error(f"❌ 生成方案失败：{str(e)}")
+            except Exception as e:
+                st.error(f"❌ 生成方案失败：未知错误 - {str(e)}")
 
-# 24时段基础数据编辑
+# 24时段基础数据编辑（仅编辑，不计算）
 st.divider()
 st.header("📊 24时段基础数据编辑")
 edited_df = st.data_editor(
@@ -463,24 +455,16 @@ edited_df = st.data_editor(
 )
 st.session_state.current_24h_data = edited_df
 
-# 关键指标展示
+# 关键指标展示（仅显示缓存结果）
 st.divider()
-st.header("📈 关键指标计算")
-
-total_generation = edited_df["当月各时段累计发电量(MWh)"].sum()
-gen_hours = calculate_generation_hours(total_generation, installed_capacity)
-if st.session_state.auto_calculate:
-    market_hours = calculate_market_hours(
-        gen_hours, power_limit_rate,
-        mechanism_value, st.session_state.mechanism_mode,
-        guaranteed_value, st.session_state.guaranteed_mode
-    )
+st.header("📈 关键指标（生成方案后更新）")
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 with col1:
+    total_generation = edited_df["当月各时段累计发电量(MWh)"].sum()
     st.metric("当月总发电量(MWh)", f"{total_generation:.2f}")
 with col2:
-    st.metric("预估发电小时数", f"{gen_hours:.2f}")
+    st.metric("预估发电小时数", f"{st.session_state.gen_hours:.2f}")
 with col3:
     st.metric("装机容量(MW)", f"{installed_capacity:.1f}")
 with col4:
@@ -488,27 +472,16 @@ with col4:
 with col5:
     st.metric(f"机制电量({st.session_state.mechanism_mode})", f"{mechanism_value:.2f}")
 with col6:
-    st.metric("市场化交易小时数", f"{market_hours:.2f}")
+    display_market_hours = st.session_state.market_hours if st.session_state.auto_calculate else st.session_state.manual_market_hours
+    st.metric("市场化交易小时数", f"{display_market_hours:.2f}")
 
-# 计算逻辑说明
-st.write("### 📝 市场化交易小时数计算逻辑")
-logic_text = f"""
-1. 预估发电小时数 = 当月总发电量 ÷ 装机容量 = {total_generation:.2f} ÷ {installed_capacity:.1f} = {gen_hours:.2f} 小时
-2. 扣减限电率后可用小时数 = {gen_hours:.2f} × (1 - {power_limit_rate:.1f}%) = {gen_hours * (1 - power_limit_rate/100):.2f} 小时
-3. 扣减机制电量：{"减小时数" if st.session_state.mechanism_mode == "小时数" else f"减{gen_hours:.2f}×{mechanism_value:.1f}%"} = {mechanism_value:.2f} → 剩余 {gen_hours * (1 - power_limit_rate/100) - (mechanism_value if st.session_state.mechanism_mode == "小时数" else gen_hours * mechanism_value/100):.2f} 小时
-4. 扣减保障性电量：{"减小时数" if st.session_state.guaranteed_mode == "小时数" else f"减{gen_hours:.2f}×{guaranteed_value:.1f}%"} = {guaranteed_value:.2f} → 最终市场化交易小时数 = {market_hours:.2f} 小时
-"""
-st.markdown(logic_text)
-
-# -------------------------- 新增：交易电量调整模块 --------------------------
-if st.session_state.trade_power_data is not None:
+# 交易电量调整模块（仅生成方案后显示）
+if st.session_state.calculated and st.session_state.trade_power_data is not None:
     st.divider()
     st.header("💰 交易电量智能调整（总电量锁定）")
     
-    # 显示锁定的总交易电量
-    st.info(f"🔒 锁定总交易电量：{st.session_state.total_trade_power:.2f} MWh（调整后总和将自动校准为此值）")
+    st.info(f"🔒 锁定总交易电量：{st.session_state.total_trade_power:.2f} MWh")
     
-    # 初始化调整数据
     if st.session_state.adjusted_trade_power is None:
         st.session_state.adjusted_trade_power = st.session_state.trade_power_data.copy()
     
@@ -526,15 +499,13 @@ if st.session_state.trade_power_data is not None:
                     st.session_state.total_trade_power
                 )
                 st.session_state.adjusted_trade_power = adjusted_df
-                st.success("✅ 已按现货电价优化（高电价时段多分配）！")
-                st.rerun()
-    
+                st.success("✅ 已按现货电价优化！")
+
     with col_adjust2:
         if st.button("🔄 重置为初始分配", use_container_width=True, key="reset_adjust_btn"):
             st.session_state.adjusted_trade_power = st.session_state.trade_power_data.copy()
             st.success("✅ 已重置为初始分配方案！")
-            st.rerun()
-    
+
     with col_adjust3:
         if st.button("🎯 自动校准总和", use_container_width=True, key="calibrate_btn"):
             calibrated_df = calibrate_trade_power(
@@ -542,9 +513,8 @@ if st.session_state.trade_power_data is not None:
                 st.session_state.total_trade_power
             )
             st.session_state.adjusted_trade_power = calibrated_df
-            st.success("✅ 已校准！所有时段交易电量总和已匹配锁定值！")
-            st.rerun()
-    
+            st.success("✅ 已校准！总和已匹配锁定值！")
+
     # 手动调整表格
     st.subheader("✏️ 手动调整各时段交易电量")
     adjust_df = st.data_editor(
@@ -565,8 +535,8 @@ if st.session_state.trade_power_data is not None:
         key="adjust_data_editor"
     )
     st.session_state.adjusted_trade_power = adjust_df
-    
-    # 实时显示调整状态
+
+    # 实时状态显示
     current_sum = adjust_df["市场化交易电量(MWh)"].sum()
     diff = st.session_state.total_trade_power - current_sum
     
@@ -579,12 +549,11 @@ if st.session_state.trade_power_data is not None:
         else:
             st.metric("校准状态", "⚠️ 未匹配", delta=f"{diff:.2f}")
     with col_status3:
-        # 显示最高电价时段
         spot_price_list = st.session_state.current_24h_data["现货价格(元/MWh)"].tolist()
         max_price_hour = spot_price_list.index(max(spot_price_list)) + 1
         st.metric("最高电价时段", f"{max_price_hour}时", value=f"{max(spot_price_list):.2f}元/MWh")
-    
-    # 调整前后对比
+
+    # 对比展示
     st.subheader("📊 调整前后对比")
     compare_df = pd.DataFrame({
         "时段": st.session_state.trade_power_data["时段"],
@@ -593,7 +562,7 @@ if st.session_state.trade_power_data is not None:
         "差值(MWh)": st.session_state.adjusted_trade_power["市场化交易电量(MWh)"] - st.session_state.trade_power_data["市场化交易电量(MWh)"]
     })
     st.dataframe(compare_df, use_container_width=True, hide_index=True)
-    
+
     # 可视化对比
     col_chart1, col_chart2 = st.columns(2)
     with col_chart1:
@@ -603,7 +572,7 @@ if st.session_state.trade_power_data is not None:
             use_container_width=True,
             y_label="电量(MWh)"
         )
-    
+
     with col_chart2:
         st.write("调整后分配电量分布")
         st.bar_chart(
@@ -635,10 +604,9 @@ if st.button("🔍 查询数据", use_container_width=True, key="query_btn"):
             st.subheader(f"查询结果：{query_region} | {query_province} | {query_month}月 | {query_site}")
             st.dataframe(query_data, use_container_width=True)
             
-            # 关键指标展示
             query_total_gen = query_data["当月各时段累计发电量(MWh)"].sum()
             query_installed_cap = query_data["装机容量(MW)"].iloc[0] if "装机容量(MW)" in query_data.columns else 0
-            query_gen_hours = calculate_generation_hours(query_total_gen, query_installed_cap)
+            query_gen_hours = round(query_total_gen / query_installed_cap, 2) if query_installed_cap > 0 else 0.0
             
             st.subheader("关键指标")
             q_col1, q_col2, q_col3 = st.columns(3)
@@ -649,7 +617,6 @@ if st.button("🔍 查询数据", use_container_width=True, key="query_btn"):
             with q_col3:
                 st.metric("预估发电小时数", f"{query_gen_hours:.2f}")
             
-            # 交易电量数据展示
             if "市场化交易电量(MWh)" in query_data.columns:
                 st.subheader("市场化交易电量分配")
                 trade_cols = ["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]
