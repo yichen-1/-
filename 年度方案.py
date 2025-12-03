@@ -6,7 +6,7 @@ from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-# -------------------------- 初始化配置 --------------------------
+# -------------------------- 全局配置 & Session State 初始化 --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
@@ -14,22 +14,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（新增光伏套利时段配置）
+# 初始化Session State（放在最顶部，所有widget之前）
 if "initialized" not in st.session_state:
+    # 基础配置
     st.session_state.initialized = True
-    st.session_state.site_data = {}
     st.session_state.current_region = "总部"
     st.session_state.current_province = ""
     st.session_state.current_year = 2025
     st.session_state.current_power_plant = ""
     st.session_state.current_plant_type = "风电"
     
-    # 光伏时段配置（套利曲线专用）
-    st.session_state.pv_core_start = 11   # 中午核心时段起始（11点）
-    st.session_state.pv_core_end = 14     # 中午核心时段结束（14点）
-    st.session_state.pv_edge_start = 6    # 两端边缘时段起始（6点）
-    st.session_state.pv_edge_end = 18     # 两端边缘时段结束（18点）
+    # 光伏套利时段配置（独立key，避免直接赋值冲突）
+    st.session_state["pv_core_start_key"] = 11   # 中午核心时段起始
+    st.session_state["pv_core_end_key"] = 14     # 中午核心时段结束
+    st.session_state["pv_edge_start_key"] = 6    # 两端边缘时段起始
+    st.session_state["pv_edge_end_key"] = 18     # 两端边缘时段结束
     
+    # 业务数据
     st.session_state.monthly_data = {}
     st.session_state.selected_months = []
     st.session_state.trade_power_typical = {}  # 方案一：典型曲线
@@ -54,18 +55,41 @@ def get_days_in_month(year, month):
         return 31
 
 def get_pv_arbitrage_hours():
-    """获取光伏套利曲线的时段划分"""
+    """获取光伏套利曲线的时段划分（从session state读取配置）"""
+    # 安全获取配置值（转为整数）
+    core_start = int(st.session_state.get("pv_core_start_key", 11))
+    core_end = int(st.session_state.get("pv_core_end_key", 14))
+    edge_start = int(st.session_state.get("pv_edge_start_key", 6))
+    edge_end = int(st.session_state.get("pv_edge_end_key", 18))
+    
+    # 校验时段有效性
+    core_start = max(1, min(24, core_start))
+    core_end = max(1, min(24, core_end))
+    edge_start = max(1, min(24, edge_start))
+    edge_end = max(1, min(24, edge_end))
+    
+    if core_start > core_end:
+        core_start, core_end = core_end, core_start
+    if edge_start > edge_end:
+        edge_start, edge_end = edge_end, edge_start
+    
     # 核心时段（中午，电量接收端）
-    core_hours = list(range(st.session_state.pv_core_start, st.session_state.pv_core_end + 1))
+    core_hours = list(range(core_start, core_end + 1))
     # 边缘时段（两端，电量转出端）
-    edge_hours = [h for h in range(st.session_state.pv_edge_start, st.session_state.pv_edge_end + 1) if h not in core_hours]
+    edge_hours = [h for h in range(edge_start, edge_end + 1) if h not in core_hours]
     # 无效时段（非发电时段）
-    invalid_hours = [h for h in range(1, 25) if h not in range(st.session_state.pv_edge_start, st.session_state.pv_edge_end + 1)]
+    invalid_hours = [h for h in range(1, 25) if h not in range(edge_start, edge_end + 1)]
     
     return {
-        "core": core_hours,       # 中午核心时段（11-14点）
-        "edge": edge_hours,       # 两端边缘时段（6-10,15-18点）
-        "invalid": invalid_hours  # 无效时段（1-5,19-24点）
+        "core": core_hours,       # 中午核心时段
+        "edge": edge_hours,       # 两端边缘时段
+        "invalid": invalid_hours, # 无效时段
+        "config": {
+            "core_start": core_start,
+            "core_end": core_end,
+            "edge_start": edge_start,
+            "edge_end": edge_end
+        }
     }
 
 def init_month_template(month):
@@ -285,6 +309,7 @@ def export_annual_plan():
     # 1. 年度汇总表（双方案总量）
     summary_data = []
     scheme2_note = "套利曲线（两端转中午）" if st.session_state.current_plant_type == "光伏" else "直线曲线（24小时平均）"
+    pv_config = get_pv_arbitrage_hours()["config"] if st.session_state.current_plant_type == "光伏" else {}
     for month in st.session_state.selected_months:
         if month not in st.session_state.trade_power_typical:
             continue
@@ -298,6 +323,8 @@ def export_annual_plan():
             "月份": month,
             "电厂名称": st.session_state.current_power_plant,
             "电厂类型": st.session_state.current_plant_type,
+            "光伏核心时段": f"{pv_config.get('core_start', '')}-{pv_config.get('core_end', '')}点" if st.session_state.current_plant_type == "光伏" else "-",
+            "光伏边缘时段": f"{pv_config.get('edge_start', '')}-{pv_config.get('edge_end', '')}点" if st.session_state.current_plant_type == "光伏" else "-",
             "方案一（典型曲线）总电量(MWh)": total_typical,
             "方案二（{}）总电量(MWh)".format(scheme2_note): total_arbitrage,
             "月份天数": get_days_in_month(st.session_state.current_year, month),
@@ -341,10 +368,12 @@ def export_annual_plan():
     
     # 3. 方案说明表
     ws_desc = wb.create_sheet(title="方案说明")
+    pv_hours = get_pv_arbitrage_hours()
     pv_desc = f"""
-    光伏方案二（套利曲线）：
-    - 核心时段：{st.session_state.pv_core_start}-{st.session_state.pv_core_end}点（接收电量）
-    - 边缘时段：{st.session_state.pv_edge_start}-{st.session_state.pv_core_start-1}点、{st.session_state.pv_core_end+1}-{st.session_state.pv_edge_end}点（转出电量）
+    光伏方案二（套利曲线）配置：
+    - 核心时段（接收电量）：{pv_hours['core']}点
+    - 边缘时段（转出电量）：{pv_hours['edge']}点
+    - 无效时段：{pv_hours['invalid']}点
     - 逻辑：将边缘时段的市场化交易电量全部转移至核心时段，总电量保持不变
     """ if st.session_state.current_plant_type == "光伏" else """
     风电方案二（直线曲线）：
@@ -389,150 +418,165 @@ REGIONS = {
 }
 
 # -------------------------- 侧边栏配置 --------------------------
-st.sidebar.header("⚙️ 基础信息配置")
-
-# 1. 年份选择
-years = list(range(2020, 2031))
-st.session_state.current_year = st.sidebar.selectbox(
-    "选择年份", years,
-    index=years.index(st.session_state.current_year),
-    key="sidebar_year"
-)
-
-# 2. 区域/省份
-selected_region = st.sidebar.selectbox(
-    "选择区域", list(REGIONS.keys()),
-    index=list(REGIONS.keys()).index(st.session_state.current_region),
-    key="sidebar_region_select"
-)
-st.session_state.current_region = selected_region
-
-current_province_list = REGIONS[st.session_state.current_region]
-if not st.session_state.current_province or st.session_state.current_province not in current_province_list:
-    st.session_state.current_province = current_province_list[0]
-
-selected_province = st.sidebar.selectbox(
-    "选择省份/地区", current_province_list,
-    index=current_province_list.index(st.session_state.current_province),
-    key="sidebar_province_select"
-)
-st.session_state.current_province = selected_province
-
-# 3. 电厂信息
-plant_name = st.sidebar.text_input(
-    "电厂名称", value=st.session_state.current_power_plant,
-    key="sidebar_plant_name", placeholder="如：张家口风电场/青海光伏电站"
-)
-st.session_state.current_power_plant = plant_name
-
-st.session_state.current_plant_type = st.sidebar.selectbox(
-    "电厂类型", ["风电", "光伏"],
-    index=["风电", "光伏"].index(st.session_state.current_plant_type),
-    key="sidebar_plant_type"
-)
-
-# 光伏套利时段配置（仅光伏显示）
-if st.session_state.current_plant_type == "光伏":
-    st.sidebar.subheader("☀️ 光伏套利曲线配置")
-    st.sidebar.write("核心时段（中午，接收电量）")
-    col_pv1, col_pv2 = st.sidebar.columns(2)
-    with col_pv1:
-        st.session_state.pv_core_start = st.number_input(
-            "核心起始（点）", min_value=1, max_value=24,
-            value=st.session_state.pv_core_start, key="pv_core_start"
-        )
-    with col_pv2:
-        st.session_state.pv_core_end = st.number_input(
-            "核心结束（点）", min_value=1, max_value=24,
-            value=st.session_state.pv_core_end, key="pv_core_end"
-        )
+with st.sidebar:
+    st.header("⚙️ 基础信息配置")
     
-    st.sidebar.write("边缘时段（两端，转出电量）")
-    col_pv3, col_pv4 = st.sidebar.columns(2)
-    with col_pv3:
-        st.session_state.pv_edge_start = st.number_input(
-            "边缘起始（点）", min_value=1, max_value=24,
-            value=st.session_state.pv_edge_start, key="pv_edge_start"
-        )
-    with col_pv4:
-        st.session_state.pv_edge_end = st.number_input(
-            "边缘结束（点）", min_value=1, max_value=24,
-            value=st.session_state.pv_edge_end, key="pv_edge_end"
-        )
-    
-    # 显示时段划分
-    pv_hours = get_pv_arbitrage_hours()
-    st.sidebar.info(f"""
-    时段划分：
-    - 核心时段（接收）：{pv_hours['core']}点
-    - 边缘时段（转出）：{pv_hours['edge']}点
-    - 无效时段：{pv_hours['invalid']}点
-    """)
-
-# 4. 装机容量
-installed_capacity = st.sidebar.number_input(
-    "装机容量(MW)", min_value=0.0, value=0.0, step=0.1,
-    key="sidebar_installed_capacity", help="电厂总装机容量，单位：兆瓦"
-)
-
-# 5. 电量参数配置
-st.sidebar.subheader("⚡ 电量参数配置")
-
-# 机制电量
-st.sidebar.write("#### 机制电量")
-col_mech1, col_mech2 = st.sidebar.columns([2, 1])
-mech_mode = col_mech1.selectbox(
-    "输入模式", ["小时数", "比例(%)"],
-    index=0 if st.session_state.mechanism_mode == "小时数" else 1,
-    key="sidebar_mechanism_mode"
-)
-st.session_state.mechanism_mode = mech_mode
-
-mech_min = 0.0
-mech_max = 100.0 if st.session_state.mechanism_mode == "比例(%)" else 1000000.0
-mechanism_value = col_mech2.number_input(
-    "数值", min_value=mech_min, max_value=mech_max, value=0.0, step=0.1,
-    key="sidebar_mechanism_value", help=f"机制电量{st.session_state.mechanism_mode}"
-)
-
-# 保障性电量
-st.sidebar.write("#### 保障性电量")
-col_gua1, col_gua2 = st.sidebar.columns([2, 1])
-gua_mode = col_gua1.selectbox(
-    "输入模式", ["小时数", "比例(%)"],
-    index=0 if st.session_state.guaranteed_mode == "小时数" else 1,
-    key="sidebar_guaranteed_mode"
-)
-st.session_state.guaranteed_mode = gua_mode
-
-gua_min = 0.0
-gua_max = 100.0 if st.session_state.guaranteed_mode == "比例(%)" else 1000000.0
-guaranteed_value = col_gua2.number_input(
-    "数值", min_value=gua_min, max_value=gua_max, value=0.0, step=0.1,
-    key="sidebar_guaranteed_value", help=f"保障性电量{st.session_state.guaranteed_mode}"
-)
-
-# 限电率
-power_limit_rate = st.sidebar.number_input(
-    "限电率(%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1,
-    key="sidebar_power_limit_rate", help="电厂当月限电比例，0-100%"
-)
-
-# 市场化交易小时数
-st.sidebar.write("#### 市场化交易小时数")
-auto_calculate = st.sidebar.toggle(
-    "自动计算", value=st.session_state.auto_calculate,
-    key="sidebar_auto_calculate"
-)
-st.session_state.auto_calculate = auto_calculate
-
-if not st.session_state.auto_calculate:
-    manual_market_hours = st.sidebar.number_input(
-        "手动输入（适用于所有选中月份）", min_value=0.0, max_value=1000000.0,
-        value=st.session_state.manual_market_hours, step=0.1,
-        key="sidebar_market_hours_manual"
+    # 1. 年份选择
+    years = list(range(2020, 2031))
+    st.session_state.current_year = st.selectbox(
+        "选择年份", years,
+        index=years.index(st.session_state.current_year),
+        key="sidebar_year"
     )
-    st.session_state.manual_market_hours = manual_market_hours
+    
+    # 2. 区域/省份
+    selected_region = st.selectbox(
+        "选择区域", list(REGIONS.keys()),
+        index=list(REGIONS.keys()).index(st.session_state.current_region),
+        key="sidebar_region_select"
+    )
+    st.session_state.current_region = selected_region
+    
+    current_province_list = REGIONS[st.session_state.current_region]
+    if not st.session_state.current_province or st.session_state.current_province not in current_province_list:
+        st.session_state.current_province = current_province_list[0]
+    
+    selected_province = st.selectbox(
+        "选择省份/地区", current_province_list,
+        index=current_province_list.index(st.session_state.current_province),
+        key="sidebar_province_select"
+    )
+    st.session_state.current_province = selected_province
+    
+    # 3. 电厂信息
+    plant_name = st.text_input(
+        "电厂名称", value=st.session_state.current_power_plant,
+        key="sidebar_plant_name", placeholder="如：张家口风电场/青海光伏电站"
+    )
+    st.session_state.current_power_plant = plant_name
+    
+    st.session_state.current_plant_type = st.selectbox(
+        "电厂类型", ["风电", "光伏"],
+        index=["风电", "光伏"].index(st.session_state.current_plant_type),
+        key="sidebar_plant_type"
+    )
+    
+    # 光伏套利时段配置（仅光伏显示）
+    if st.session_state.current_plant_type == "光伏":
+        st.subheader("☀️ 光伏套利曲线配置")
+        st.write("核心时段（中午，接收电量）")
+        col_pv1, col_pv2 = st.columns(2)
+        with col_pv1:
+            # 使用独立key，避免直接赋值session state
+            st.number_input(
+                "核心起始（点）", min_value=1, max_value=24,
+                value=st.session_state["pv_core_start_key"],
+                key="input_pv_core_start"
+            )
+        with col_pv2:
+            st.number_input(
+                "核心结束（点）", min_value=1, max_value=24,
+                value=st.session_state["pv_core_end_key"],
+                key="input_pv_core_end"
+            )
+        
+        st.write("边缘时段（两端，转出电量）")
+        col_pv3, col_pv4 = st.columns(2)
+        with col_pv3:
+            st.number_input(
+                "边缘起始（点）", min_value=1, max_value=24,
+                value=st.session_state["pv_edge_start_key"],
+                key="input_pv_edge_start"
+            )
+        with col_pv4:
+            st.number_input(
+                "边缘结束（点）", min_value=1, max_value=24,
+                value=st.session_state["pv_edge_end_key"],
+                key="input_pv_edge_end"
+            )
+        
+        # 同步input值到session state（关键修复：避免直接赋值）
+        st.session_state["pv_core_start_key"] = st.session_state.get("input_pv_core_start", 11)
+        st.session_state["pv_core_end_key"] = st.session_state.get("input_pv_core_end", 14)
+        st.session_state["pv_edge_start_key"] = st.session_state.get("input_pv_edge_start", 6)
+        st.session_state["pv_edge_end_key"] = st.session_state.get("input_pv_edge_end", 18)
+        
+        # 显示时段划分
+        pv_hours = get_pv_arbitrage_hours()
+        st.info(f"""
+        时段划分：
+        - 核心时段（接收）：{pv_hours['core']}点
+        - 边缘时段（转出）：{pv_hours['edge']}点
+        - 无效时段：{pv_hours['invalid']}点
+        """)
+    
+    # 4. 装机容量
+    installed_capacity = st.number_input(
+        "装机容量(MW)", min_value=0.0, value=0.0, step=0.1,
+        key="sidebar_installed_capacity", help="电厂总装机容量，单位：兆瓦"
+    )
+    
+    # 5. 电量参数配置
+    st.subheader("⚡ 电量参数配置")
+    
+    # 机制电量
+    st.write("#### 机制电量")
+    col_mech1, col_mech2 = st.columns([2, 1])
+    with col_mech1:
+        mech_mode = st.selectbox(
+            "输入模式", ["小时数", "比例(%)"],
+            index=0 if st.session_state.mechanism_mode == "小时数" else 1,
+            key="sidebar_mechanism_mode"
+        )
+        st.session_state.mechanism_mode = mech_mode
+    with col_mech2:
+        mech_min = 0.0
+        mech_max = 100.0 if st.session_state.mechanism_mode == "比例(%)" else 1000000.0
+        mechanism_value = st.number_input(
+            "数值", min_value=mech_min, max_value=mech_max, value=0.0, step=0.1,
+            key="sidebar_mechanism_value", help=f"机制电量{st.session_state.mechanism_mode}"
+        )
+    
+    # 保障性电量
+    st.write("#### 保障性电量")
+    col_gua1, col_gua2 = st.columns([2, 1])
+    with col_gua1:
+        gua_mode = st.selectbox(
+            "输入模式", ["小时数", "比例(%)"],
+            index=0 if st.session_state.guaranteed_mode == "小时数" else 1,
+            key="sidebar_guaranteed_mode"
+        )
+        st.session_state.guaranteed_mode = gua_mode
+    with col_gua2:
+        gua_min = 0.0
+        gua_max = 100.0 if st.session_state.guaranteed_mode == "比例(%)" else 1000000.0
+        guaranteed_value = st.number_input(
+            "数值", min_value=gua_min, max_value=gua_max, value=0.0, step=0.1,
+            key="sidebar_guaranteed_value", help=f"保障性电量{st.session_state.guaranteed_mode}"
+        )
+    
+    # 限电率
+    power_limit_rate = st.number_input(
+        "限电率(%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1,
+        key="sidebar_power_limit_rate", help="电厂当月限电比例，0-100%"
+    )
+    
+    # 市场化交易小时数
+    st.write("#### 市场化交易小时数")
+    auto_calculate = st.toggle(
+        "自动计算", value=st.session_state.auto_calculate,
+        key="sidebar_auto_calculate"
+    )
+    st.session_state.auto_calculate = auto_calculate
+    
+    manual_market_hours = 0.0
+    if not st.session_state.auto_calculate:
+        manual_market_hours = st.number_input(
+            "手动输入（适用于所有选中月份）", min_value=0.0, max_value=1000000.0,
+            value=st.session_state.manual_market_hours, step=0.1,
+            key="sidebar_market_hours_manual"
+        )
+        st.session_state.manual_market_hours = manual_market_hours
 
 # -------------------------- 主页面内容 --------------------------
 st.title("⚡ 新能源电厂年度方案设计系统")
@@ -584,7 +628,7 @@ with col_import3:
     if st.session_state.selected_months:
         st.info(f"当前选中月份：{', '.join([f'{m}月' for m in st.session_state.selected_months])}")
     else:
-        st.warning("⚠️ 请选择需要处理的月份")
+        st.warning("⚠️ 请先选择需要处理的月份")
 
 # 二、数据操作按钮
 st.divider()
