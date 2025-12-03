@@ -12,13 +12,13 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化会话状态
+# 初始化会话状态（修复初始值不匹配问题）
 if "site_data" not in st.session_state:
     st.session_state.site_data = {}
 if "current_region" not in st.session_state:
-    st.session_state.current_region = "总部"
+    st.session_state.current_region = "总部"  # 默认选中总部
 if "current_province" not in st.session_state:
-    st.session_state.current_province = "北京"
+    st.session_state.current_province = ""  # 先置空，后续自动匹配
 if "current_month" not in st.session_state:
     st.session_state.current_month = 1
 if "current_site" not in st.session_state:
@@ -90,11 +90,18 @@ st.session_state.current_region = st.sidebar.selectbox(
     key="region_select"
 )
 
-# 省份/地区选择（根据区域动态加载）
+# 获取当前区域的省份列表
+current_province_list = REGIONS[st.session_state.current_region]
+
+# 自动匹配初始省份（修复索引错误核心逻辑）
+if not st.session_state.current_province or st.session_state.current_province not in current_province_list:
+    st.session_state.current_province = current_province_list[0]  # 默认选中第一个
+
+# 省份/地区选择（安全的索引处理）
 st.session_state.current_province = st.sidebar.selectbox(
     "选择省份/地区",
-    REGIONS[st.session_state.current_region],
-    index=REGIONS[st.session_state.current_region].index(st.session_state.current_province),
+    current_province_list,
+    index=current_province_list.index(st.session_state.current_province),  # 此时值一定在列表中
     key="province_select"
 )
 
@@ -326,7 +333,9 @@ query_col1, query_col2, query_col3, query_col4 = st.columns(4)
 with query_col1:
     query_region = st.selectbox("查询区域", list(REGIONS.keys()), key="query_region")
 with query_col2:
-    query_province = st.selectbox("查询省份/地区", REGIONS[query_region], key="query_province")
+    # 查询省份也做安全处理
+    query_province_list = REGIONS[query_region]
+    query_province = st.selectbox("查询省份/地区", query_province_list, key="query_province")
 with query_col3:
     query_month = st.selectbox("查询月份", MONTHS, key="query_month")
 with query_col4:
