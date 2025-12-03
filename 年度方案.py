@@ -172,7 +172,7 @@ def calculate_trade_power_typical(month, market_hours, installed_capacity):
     trade_df["电厂名称"] = st.session_state.current_power_plant
     # 数据清洗：填充NaN，确保数值类型
     trade_df = trade_df.fillna(0.0)
-    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(float)
+    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
     return trade_df, round(total_trade_power, 2)
 
 def calculate_trade_power_linear(month, total_trade_power):
@@ -200,7 +200,7 @@ def calculate_trade_power_linear(month, total_trade_power):
     trade_df["电厂名称"] = st.session_state.current_power_plant
     # 数据清洗：填充NaN，确保数值类型
     trade_df = trade_df.fillna(0.0)
-    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(float)
+    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(np.float64)
     return trade_df
 
 def decompose_to_daily(trade_df, year, month):
@@ -636,34 +636,44 @@ if st.session_state.calculated and st.session_state.selected_months:
     # 典型方案展示
     st.write(f"### 典型出力曲线方案（{view_month}月）")
     typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
-    # 数据清洗：确保无NaN，类型正确
+    # 深度数据清洗
     typical_df = typical_df.fillna(0.0)
-    typical_df["市场化交易电量(MWh)"] = typical_df["市场化交易电量(MWh)"].astype(float)
+    typical_df["市场化交易电量(MWh)"] = typical_df["市场化交易电量(MWh)"].astype(np.float64)
+    typical_df = typical_df.reset_index(drop=True)
     st.dataframe(typical_df, use_container_width=True, hide_index=True)
-    # 典型方案图表（修复参数，适配Streamlit API）
-    chart_data_typical = typical_df.set_index("时段")["市场化交易电量(MWh)"]
-    st.bar_chart(
-        chart_data_typical,
-        use_container_width=True,
-        ylabel="交易电量(MWh)"  # 修复：y_label → ylabel
-    )
-    st.caption(f"{view_month}月典型方案电量分布")
+    
+    # 典型方案图表（极简版，仅保留核心参数）
+    try:
+        # 确保数据非空且为数值
+        chart_data = typical_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
+        if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
+            st.write(f"#### {view_month}月典型方案电量分布")
+            st.bar_chart(chart_data, use_container_width=True)
+        else:
+            st.info("⚠️ 暂无有效数据生成图表")
+    except Exception as e:
+        st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
     
     # 直线方案展示
     st.write(f"### 直线方案（平均分配，{view_month}月）")
     linear_df = st.session_state.trade_power_linear[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
-    # 数据清洗：确保无NaN，类型正确
+    # 深度数据清洗
     linear_df = linear_df.fillna(0.0)
-    linear_df["市场化交易电量(MWh)"] = linear_df["市场化交易电量(MWh)"].astype(float)
+    linear_df["市场化交易电量(MWh)"] = linear_df["市场化交易电量(MWh)"].astype(np.float64)
+    linear_df = linear_df.reset_index(drop=True)
     st.dataframe(linear_df, use_container_width=True, hide_index=True)
-    # 直线方案图表（修复参数，适配Streamlit API）
-    chart_data_linear = linear_df.set_index("时段")["市场化交易电量(MWh)"]
-    st.bar_chart(
-        chart_data_linear,
-        use_container_width=True,
-        ylabel="交易电量(MWh)"  # 修复：y_label → ylabel
-    )
-    st.caption(f"{view_month}月直线方案电量分布")
+    
+    # 直线方案图表（极简版，仅保留核心参数）
+    try:
+        # 确保数据非空且为数值
+        chart_data = linear_df[["时段", "市场化交易电量(MWh)"]].set_index("时段")
+        if not chart_data.empty and chart_data["市场化交易电量(MWh)"].sum() > 0:
+            st.write(f"#### {view_month}月直线方案电量分布")
+            st.bar_chart(chart_data, use_container_width=True)
+        else:
+            st.info("⚠️ 暂无有效数据生成图表")
+    except Exception as e:
+        st.warning(f"📊 图表生成失败：{str(e)}（不影响数据导出）")
     
     # 3. 日分解展示（当前查看月份）
     st.subheader(f"3. {view_month}月日分解电量（按天数平均）")
