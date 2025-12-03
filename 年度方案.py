@@ -170,6 +170,9 @@ def calculate_trade_power_typical(month, market_hours, installed_capacity):
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
+    # 数据清洗：填充NaN，确保数值类型
+    trade_df = trade_df.fillna(0.0)
+    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(float)
     return trade_df, round(total_trade_power, 2)
 
 def calculate_trade_power_linear(month, total_trade_power):
@@ -195,6 +198,9 @@ def calculate_trade_power_linear(month, total_trade_power):
     trade_df["年份"] = st.session_state.current_year
     trade_df["月份"] = month
     trade_df["电厂名称"] = st.session_state.current_power_plant
+    # 数据清洗：填充NaN，确保数值类型
+    trade_df = trade_df.fillna(0.0)
+    trade_df["市场化交易电量(MWh)"] = trade_df["市场化交易电量(MWh)"].astype(float)
     return trade_df
 
 def decompose_to_daily(trade_df, year, month):
@@ -204,6 +210,8 @@ def decompose_to_daily(trade_df, year, month):
     # 计算每日该时段电量：月度时段电量 / 天数
     df["每日时段电量(MWh)"] = round(df["市场化交易电量(MWh)"] / days, 4)
     df["月份天数"] = days
+    # 数据清洗
+    df = df.fillna(0.0)
     return df
 
 def export_annual_plan():
@@ -627,27 +635,35 @@ if st.session_state.calculated and st.session_state.selected_months:
     
     # 典型方案展示
     st.write(f"### 典型出力曲线方案（{view_month}月）")
-    typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]]
+    typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
+    # 数据清洗：确保无NaN，类型正确
+    typical_df = typical_df.fillna(0.0)
+    typical_df["市场化交易电量(MWh)"] = typical_df["市场化交易电量(MWh)"].astype(float)
     st.dataframe(typical_df, use_container_width=True, hide_index=True)
-    # 典型方案图表
+    # 典型方案图表（修复参数，适配Streamlit API）
+    chart_data_typical = typical_df.set_index("时段")["市场化交易电量(MWh)"]
     st.bar_chart(
-        typical_df.set_index("时段")["市场化交易电量(MWh)"],
+        chart_data_typical,
         use_container_width=True,
-        y_label="交易电量(MWh)",
-        title=f"{view_month}月典型方案电量分布"
+        ylabel="交易电量(MWh)"  # 修复：y_label → ylabel
     )
+    st.caption(f"{view_month}月典型方案电量分布")
     
     # 直线方案展示
     st.write(f"### 直线方案（平均分配，{view_month}月）")
-    linear_df = st.session_state.trade_power_linear[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]]
+    linear_df = st.session_state.trade_power_linear[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "市场化交易电量(MWh)"]].copy()
+    # 数据清洗：确保无NaN，类型正确
+    linear_df = linear_df.fillna(0.0)
+    linear_df["市场化交易电量(MWh)"] = linear_df["市场化交易电量(MWh)"].astype(float)
     st.dataframe(linear_df, use_container_width=True, hide_index=True)
-    # 直线方案图表
+    # 直线方案图表（修复参数，适配Streamlit API）
+    chart_data_linear = linear_df.set_index("时段")["市场化交易电量(MWh)"]
     st.bar_chart(
-        linear_df.set_index("时段")["市场化交易电量(MWh)"],
+        chart_data_linear,
         use_container_width=True,
-        y_label="交易电量(MWh)",
-        title=f"{view_month}月直线方案电量分布"
+        ylabel="交易电量(MWh)"  # 修复：y_label → ylabel
     )
+    st.caption(f"{view_month}月直线方案电量分布")
     
     # 3. 日分解展示（当前查看月份）
     st.subheader(f"3. {view_month}月日分解电量（按天数平均）")
@@ -661,6 +677,8 @@ if st.session_state.calculated and st.session_state.selected_months:
         "直线方案日电量(MWh)": linear_daily["每日时段电量(MWh)"],
         "月份天数": typical_daily["月份天数"]
     })
+    # 数据清洗
+    daily_compare = daily_compare.fillna(0.0)
     st.dataframe(daily_compare, use_container_width=True, hide_index=True)
     st.info(f"注：日电量 = 月度时段电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）")
 
