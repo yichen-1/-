@@ -15,23 +15,26 @@ st.set_page_config(
 # 初始化会话状态
 if "site_data" not in st.session_state:
     st.session_state.site_data = {}
+if "current_region" not in st.session_state:
+    st.session_state.current_region = "总部"
 if "current_province" not in st.session_state:
-    st.session_state.current_province = ""
+    st.session_state.current_province = "北京"
 if "current_month" not in st.session_state:
     st.session_state.current_month = 1
 if "current_site" not in st.session_state:
     st.session_state.current_site = ""
 
-# 定义省份列表（可根据需要扩展）
-PROVINCES = [
-    "北京市", "天津市", "河北省", "山西省", "内蒙古自治区",
-    "辽宁省", "吉林省", "黑龙江省", "上海市", "江苏省",
-    "浙江省", "安徽省", "福建省", "江西省", "山东省",
-    "河南省", "湖北省", "湖南省", "广东省", "广西壮族自治区",
-    "海南省", "重庆市", "四川省", "贵州省", "云南省",
-    "西藏自治区", "陕西省", "甘肃省", "青海省", "宁夏回族自治区",
-    "新疆维吾尔自治区"
-]
+# 定义区域-省份字典（匹配需求格式+新增内容）
+REGIONS = {
+    "总部": ["北京"],
+    "华北": ["首都", "河北", "冀北", "山东", "山西", "天津", "蒙西", "内蒙古电网"],
+    "华东": ["安徽", "福建", "江苏", "上海", "浙江"],
+    "华中": ["湖北", "河南", "湖南", "江西"],
+    "东北": ["吉林", "黑龙江", "辽宁", "蒙东"],
+    "西北": ["甘肃", "宁夏", "青海", "陕西", "新疆"],
+    "西南": ["重庆", "四川", "西藏"],
+    "南方": ["广东", "广西", "云南", "海南", "贵州"]  # 新增南方区域
+}
 
 # 月份列表
 MONTHS = list(range(1, 13))
@@ -57,7 +60,7 @@ def calculate_generation_hours(total_generation, installed_capacity):
 
 def save_data_to_file(province, month, site_name, data):
     """保存数据到CSV文件"""
-    # 创建保存目录
+    # 创建保存目录（按省份+场站分层）
     save_dir = f"./新能源场站数据/{province}/{site_name}"
     os.makedirs(save_dir, exist_ok=True)
     
@@ -79,11 +82,19 @@ def load_data_from_file(province, month, site_name):
 # -------------------------- 侧边栏配置 --------------------------
 st.sidebar.header("⚙️ 基础信息配置")
 
-# 省份选择
+# 区域选择
+st.session_state.current_region = st.sidebar.selectbox(
+    "选择区域",
+    list(REGIONS.keys()),
+    index=list(REGIONS.keys()).index(st.session_state.current_region),
+    key="region_select"
+)
+
+# 省份/地区选择（根据区域动态加载）
 st.session_state.current_province = st.sidebar.selectbox(
-    "选择省份",
-    PROVINCES,
-    index=PROVINCES.index(st.session_state.current_province) if st.session_state.current_province in PROVINCES else 0,
+    "选择省份/地区",
+    REGIONS[st.session_state.current_region],
+    index=REGIONS[st.session_state.current_region].index(st.session_state.current_province),
     key="province_select"
 )
 
@@ -150,7 +161,7 @@ market_hours = st.sidebar.number_input(
 
 # -------------------------- 主页面内容 --------------------------
 st.title("⚡ 新能源场站年度方案设计系统")
-st.subheader(f"当前配置：{st.session_state.current_province} | {st.session_state.current_month}月 | {st.session_state.current_site}")
+st.subheader(f"当前配置：{st.session_state.current_region} | {st.session_state.current_province} | {st.session_state.current_month}月 | {st.session_state.current_site}")
 
 # 数据操作区域
 col1, col2, col3, col4 = st.columns(4)
@@ -269,7 +280,7 @@ st.dataframe(param_df, use_container_width=True, hide_index=True)
 if save_btn:
     # 验证必填信息
     if not st.session_state.current_province:
-        st.warning("⚠️ 请选择省份")
+        st.warning("⚠️ 请选择省份/地区")
     elif not st.session_state.current_site:
         st.warning("⚠️ 请输入场站名称")
     elif installed_capacity <= 0:
@@ -278,7 +289,8 @@ if save_btn:
         # 整合所有数据
         final_data = edited_df.copy()
         # 添加元数据
-        final_data["省份"] = st.session_state.current_province
+        final_data["区域"] = st.session_state.current_region
+        final_data["省份/地区"] = st.session_state.current_province
         final_data["月份"] = st.session_state.current_month
         final_data["场站名称"] = st.session_state.current_site
         final_data["装机容量(MW)"] = installed_capacity
@@ -298,7 +310,7 @@ if save_btn:
                 final_data
             )
             # 保存到会话状态
-            key = f"{st.session_state.current_province}_{st.session_state.current_month}_{st.session_state.current_site}"
+            key = f"{st.session_state.current_region}_{st.session_state.current_province}_{st.session_state.current_month}_{st.session_state.current_site}"
             st.session_state.site_data[key] = final_data
             
             st.success(f"✅ 数据保存成功！\n文件路径：{filepath}")
@@ -309,24 +321,26 @@ if save_btn:
 st.divider()
 st.header("🗂️ 历史数据查询")
 
-# 数据查询区域
-query_col1, query_col2, query_col3 = st.columns(3)
+# 数据查询区域（匹配区域-省份层级）
+query_col1, query_col2, query_col3, query_col4 = st.columns(4)
 with query_col1:
-    query_province = st.selectbox("查询省份", PROVINCES, key="query_province")
+    query_region = st.selectbox("查询区域", list(REGIONS.keys()), key="query_region")
 with query_col2:
-    query_month = st.selectbox("查询月份", MONTHS, key="query_month")
+    query_province = st.selectbox("查询省份/地区", REGIONS[query_region], key="query_province")
 with query_col3:
+    query_month = st.selectbox("查询月份", MONTHS, key="query_month")
+with query_col4:
     query_site = st.text_input("查询场站名称", key="query_site", placeholder="输入要查询的场站名称")
 
 query_btn = st.button("🔍 查询数据", use_container_width=True)
 
 if query_btn:
     if not query_province or not query_site:
-        st.warning("⚠️ 请填写查询省份和场站名称")
+        st.warning("⚠️ 请填写查询省份/地区和场站名称")
     else:
         query_data = load_data_from_file(query_province, query_month, query_site)
         if query_data is not None:
-            st.subheader(f"查询结果：{query_province} | {query_month}月 | {query_site}")
+            st.subheader(f"查询结果：{query_region} | {query_province} | {query_month}月 | {query_site}")
             st.dataframe(query_data, use_container_width=True)
             
             # 重新计算关键指标用于展示
