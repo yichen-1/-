@@ -893,7 +893,7 @@ if st.session_state.calculated and st.session_state.selected_months:
     # 原始平均发电量（来自月度基础数据，不随调整变化，保证权重稳定）
     base_df = st.session_state.monthly_data.get(adj_month, None)
 
-    if not scheme_df or not base_df:
+    if scheme_df is None or scheme_df.empty or base_df is None or base_df.empty:
         st.warning("⚠️ 请先生成该月份的方案数据")
     else:
         # 提取原始平均发电量（权重依据）
