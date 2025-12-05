@@ -5,8 +5,8 @@ import os
 from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-
-# -------------------------- 必备：区域-省份映射字典（唯一全局定义，删除重复） --------------------------
+# -------------------------- 必备：区域-省份映射字典（必须定义！） --------------------------
+# 按你的实际业务需求修改省份列表，支持自定义区域
 REGIONS = {
     "总部": ["全国", "通用"],
     "华北区域": ["北京", "天津", "河北", "山西", "内蒙古"],
@@ -19,7 +19,14 @@ REGIONS = {
     "其他区域": ["自定义省份"]
 }
 
-# -------------------------- 全局配置（只调用1次，删除重复） --------------------------
+# -------------------------- 全局配置 & Session State 初始化 --------------------------
+st.set_page_config(
+    page_title="新能源电厂年度方案设计系统",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+# -------------------------- 全局配置 & Session State 初始化 --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
@@ -27,56 +34,27 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# -------------------------- Session State 完整初始化（修复核心：补全所有缺失键） --------------------------
 if "initialized" not in st.session_state:
-    # 基础信息默认值
-    st.session_state.current_year = 2025
-    st.session_state.current_region = "总部"
-    st.session_state.current_province = REGIONS["总部"][0]  # 联动区域默认省份
-    st.session_state.current_power_plant = "示例电厂"
-    st.session_state.current_plant_type = "风电"  # 默认电厂类型
-    st.session_state.installed_capacity = 0.0  # 装机容量（存入Session State）
-    
-    # 数据存储容器
-    st.session_state.monthly_data = {}  # 分月基础数据
-    st.session_state.selected_months = []  # 选中的月份
-    st.session_state.trade_power_typical = {}  # 方案一结果
-    st.session_state.trade_power_arbitrage = {}  # 方案二结果
-    st.session_state.market_hours = {}  # 市场化小时数
-    st.session_state.gen_hours = {}  # 发电小时数
-    st.session_state.total_annual_trade = 0.0  # 年度总交易电量
-    st.session_state.calculated = False  # 是否已生成方案
-    
-    # 市场化小时数配置
-    st.session_state.auto_calculate = True  # 自动计算开关
-    st.session_state.manual_market_hours = 0.0  # 手动输入值
-    
-    # 分月电量参数（每个月独立存储）
+    # （保留你原来的其他初始化项）
+    # ...
+
+    # 新增：分月电量参数（每个月独立存储）
     st.session_state.monthly_params = {
-        month: {
-            "mechanism_mode": "小时数",
-            "mechanism_value": 0.0,
-            "guaranteed_mode": "小时数",
-            "guaranteed_value": 0.0,
-            "power_limit_rate": 0.0
+        month: {  # 1-12月，每个月对应独立参数
+            "mechanism_mode": "小时数",    # 机制电量输入模式
+            "mechanism_value": 0.0,        # 机制电量数值
+            "guaranteed_mode": "小时数",   # 保障性电量输入模式
+            "guaranteed_value": 0.0,       # 保障性电量数值
+            "power_limit_rate": 0.0        # 限电率(%)
         } for month in range(1, 13)
     }
-    
-    # 批量应用默认参数
+
+    # 保留：批量应用的默认参数（用于批量设置时的初始值）
     st.session_state.batch_mech_mode = "小时数"
     st.session_state.batch_mech_value = 0.0
     st.session_state.batch_gua_mode = "小时数"
     st.session_state.batch_gua_value = 0.0
     st.session_state.batch_limit_rate = 0.0
-    
-    # 光伏套利曲线配置（默认值，修复KeyError）
-    st.session_state.pv_core_start_key = 11
-    st.session_state.pv_core_end_key = 14
-    st.session_state.pv_edge_start_key = 6
-    st.session_state.pv_edge_end_key = 18
-    
-    # 初始化标记（防止重复初始化）
-    st.session_state.initialized = True
 
 # -------------------------- 核心工具函数 --------------------------
 def get_days_in_month(year, month):
@@ -115,9 +93,9 @@ def get_pv_arbitrage_hours():
     invalid_hours = [h for h in range(1, 25) if h not in range(edge_start, edge_end + 1)]
     
     return {
-        "core": core_hours,
-        "edge": edge_hours,
-        "invalid": invalid_hours,
+        "core": core_hours,       # 中午核心时段
+        "edge": edge_hours,       # 两端边缘时段
+        "invalid": invalid_hours, # 无效时段
         "config": {
             "core_start": core_start,
             "core_end": core_end,
@@ -190,19 +168,10 @@ def batch_import_excel(file):
         st.error(f"批量导入失败：{str(e)}")
         return None
 
-# 修复函数参数：补全所有必填参数（核心修复点）
-def calculate_core_params_monthly(month, installed_capacity):
-    """按月份计算核心参数（市场化小时数、发电小时数）- 从monthly_params读取分月参数"""
+def calculate_core_params_monthly(month, installed_capacity, power_limit_rate, mechanism_value, mechanism_mode, guaranteed_value, guaranteed_mode):
+    """按月份计算核心参数（市场化小时数、发电小时数）"""
     if month not in st.session_state.monthly_data:
         return 0.0, 0.0
-    # 获取该月的分月参数（修复：从Session State读取）
-    params = st.session_state.monthly_params[month]
-    power_limit_rate = params["power_limit_rate"]
-    mechanism_value = params["mechanism_value"]
-    mechanism_mode = params["mechanism_mode"]
-    guaranteed_value = params["guaranteed_value"]
-    guaranteed_mode = params["guaranteed_mode"]
-    
     df = st.session_state.monthly_data[month]
     total_generation = df["当月各时段累计发电量(MWh)"].sum()
     gen_hours = round(total_generation / installed_capacity, 2) if installed_capacity > 0 else 0.0
@@ -345,6 +314,20 @@ def decompose_double_scheme(typical_df, arbitrage_df, year, month):
 
 def export_annual_plan():
     """导出年度方案Excel（双方案月度+日分解四列数据）"""
+    # 第一步：过滤有效月份（仅保留生成方案成功的月份）
+    valid_months = []
+    for month in st.session_state.selected_months:
+        # 校验该月份是否同时存在方案一和方案二的数据
+        if (month in st.session_state.trade_power_typical 
+            and month in st.session_state.trade_power_arbitrage):
+            valid_months.append(month)
+        else:
+            st.warning(f"⚠️ 跳过无效月份 {month}月（方案数据未生成或生成失败）")
+    
+    if not valid_months:
+        st.error("❌ 无有效方案数据可导出，请先确保所有选中月份的方案生成成功！")
+        return None  # 无有效数据时返回None，避免后续报错
+    
     wb = Workbook()
     wb.remove(wb.active)
     total_annual = 0.0
@@ -353,11 +336,26 @@ def export_annual_plan():
     summary_data = []
     scheme2_note = "套利曲线（两端转中午）" if st.session_state.current_plant_type == "光伏" else "直线曲线（24小时平均）"
     pv_config = get_pv_arbitrage_hours()["config"] if st.session_state.current_plant_type == "光伏" else {}
-    for month in st.session_state.selected_months:
-        if month not in st.session_state.trade_power_typical:
+    
+    # 循环有效月份（而非全部选中月份）
+    for month in valid_months:
+        # 安全访问：确保数据存在（双重保险）
+        typical_df = st.session_state.trade_power_typical.get(month, None)
+        arbitrage_df = st.session_state.trade_power_arbitrage.get(month, None)
+        if typical_df is None or arbitrage_df is None:
+            st.warning(f"⚠️ 月份 {month}月 数据异常，跳过导出")
             continue
-        typical_df = st.session_state.trade_power_typical[month]
-        arbitrage_df = st.session_state.trade_power_arbitrage[month]
+        
+        # 校验必要列是否存在（避免列名错误导致的KeyError）
+        required_cols_typical = ["时段", "方案一月度电量(MWh)"]
+        required_cols_arbitrage = ["时段", "方案二月度电量(MWh)"]
+        if not all(col in typical_df.columns for col in required_cols_typical):
+            st.warning(f"⚠️ 月份 {month}月 方案一缺少必要列，跳过导出")
+            continue
+        if not all(col in arbitrage_df.columns for col in required_cols_arbitrage):
+            st.warning(f"⚠️ 月份 {month}月 方案二缺少必要列，跳过导出")
+            continue
+        
         total_typical = typical_df["方案一月度电量(MWh)"].sum()
         total_arbitrage = arbitrage_df["方案二月度电量(MWh)"].sum()
         total_annual += total_typical
@@ -372,36 +370,51 @@ def export_annual_plan():
             "方案二（{}）总电量(MWh)".format(scheme2_note): total_arbitrage,
             "月份天数": get_days_in_month(st.session_state.current_year, month),
             "市场化小时数": st.session_state.market_hours.get(month, 0.0),
-            "占年度比重(%)": round(total_typical / st.session_state.total_annual_trade * 100, 2)
+            "占年度比重(%)": round(total_typical / total_annual * 100, 2) if total_annual > 0 else 0.0
         })
-    summary_df = pd.DataFrame(summary_data)
-    ws_summary = wb.create_sheet(title="年度汇总")
-    for r in dataframe_to_rows(summary_df, index=False, header=True):
-        ws_summary.append(r)
+    
+    # 生成年度汇总表（确保有数据才生成）
+    if summary_data:
+        summary_df = pd.DataFrame(summary_data)
+        ws_summary = wb.create_sheet(title="年度汇总")
+        for r in dataframe_to_rows(summary_df, index=False, header=True):
+            ws_summary.append(r)
+    else:
+        st.error("❌ 无有效汇总数据，导出失败！")
+        return None
     
     # 2. 各月份详细表（双方案月度+日分解四列）
-    for month in st.session_state.selected_months:
-        if month not in st.session_state.monthly_data:
-            continue
-        # 基础数据
-        base_df = st.session_state.monthly_data[month][["时段", "平均发电量(MWh)", "现货价格(元/MWh)", "中长期价格(元/MWh)"]].copy()
-        # 典型曲线（方案一）
-        typical_df = st.session_state.trade_power_typical[month][["时段", "方案一月度电量(MWh)", "时段比重(%)"]].copy()
-        typical_df.rename(columns={"时段比重(%)": "方案一时段比重(%)"}, inplace=True)
-        # 套利/直线曲线（方案二）
-        arbitrage_df = st.session_state.trade_power_arbitrage[month][["时段", "方案二月度电量(MWh)", "时段比重(%)"]].copy()
-        arbitrage_df.rename(columns={"时段比重(%)": "方案二时段比重(%)"}, inplace=True)
-        # 双方案日分解
-        decompose_df = decompose_double_scheme(
-            st.session_state.trade_power_typical[month],
-            st.session_state.trade_power_arbitrage[month],
-            st.session_state.current_year,
-            month
-        )[["时段", "方案一日分解电量(MWh)", "方案二日分解电量(MWh)", "月份天数"]].copy()
+    for month in valid_months:
+        typical_df = st.session_state.trade_power_typical[month]
+        arbitrage_df = st.session_state.trade_power_arbitrage[month]
         
-        # 合并所有数据
-        merged_df = base_df.merge(typical_df, on="时段")
-        merged_df = merged_df.merge(arbitrage_df, on="时段")
+        # 基础数据（安全访问）
+        base_df = st.session_state.monthly_data.get(month, None)
+        if base_df is None:
+            st.warning(f"⚠️ 月份 {month}月 基础数据缺失，跳过详细表")
+            continue
+        
+        # 基础数据列校验
+        base_cols = ["时段", "平均发电量(MWh)", "现货价格(元/MWh)", "中长期价格(元/MWh)"]
+        if not all(col in base_df.columns for col in base_cols):
+            st.warning(f"⚠️ 月份 {month}月 基础数据缺少必要列，跳过详细表")
+            continue
+        
+        # 典型曲线（方案一）- 只保留需要的列
+        typical_df_selected = typical_df[["时段", "方案一月度电量(MWh)", "时段比重(%)"]].copy()
+        typical_df_selected.rename(columns={"时段比重(%)": "方案一时段比重(%)"}, inplace=True)
+        
+        # 套利/直线曲线（方案二）- 只保留需要的列
+        arbitrage_df_selected = arbitrage_df[["时段", "方案二月度电量(MWh)", "时段比重(%)"]].copy()
+        arbitrage_df_selected.rename(columns={"时段比重(%)": "方案二时段比重(%)"}, inplace=True)
+        
+        # 双方案日分解
+        decompose_df = decompose_double_scheme(typical_df, arbitrage_df, st.session_state.current_year, month)
+        decompose_df = decompose_df[["时段", "方案一日分解电量(MWh)", "方案二日分解电量(MWh)", "月份天数"]].copy()
+        
+        # 合并所有数据（按时段关联）
+        merged_df = base_df[base_cols].merge(typical_df_selected, on="时段")
+        merged_df = merged_df.merge(arbitrage_df_selected, on="时段")
         merged_df = merged_df.merge(decompose_df, on="时段")
         
         # 创建子表
@@ -442,26 +455,43 @@ def export_annual_plan():
     for row in desc_content:
         ws_desc.append(row)
     
+    # 导出Excel
     from io import BytesIO
     output = BytesIO()
     wb.save(output)
     output.seek(0)
     return output
 
-# -------------------------- 侧边栏配置 --------------------------
+# -------------------------- 区域-省份字典 --------------------------
+REGIONS = {
+    "总部": ["北京"],
+    "华北": ["首都", "河北", "冀北", "山东", "山西", "天津"],
+    "华东": ["安徽", "福建", "江苏", "上海", "浙江"],
+    "华中": ["湖北", "河南", "湖南", "江西"],
+    "东北": ["吉林", "黑龙江", "辽宁", "蒙东"],
+    "西北": ["甘肃", "宁夏", "青海", "陕西", "新疆"],
+    "西南": ["重庆", "四川", "西藏"],
+    "南方": ["广东", "广西", "云南", "海南", "贵州"],
+    "内蒙古电网": ["蒙西"]
+}
+
+# 侧边栏配置
 with st.sidebar:
     st.header("⚙️ 基础信息配置")
     
-    # 1. 年份选择
+    # 1. 年份选择（已修复，保留）
     years = list(range(2020, 2031))
     current_year = st.session_state.get("current_year", 2025)
+    if current_year not in years:
+        current_year = 2025
     st.session_state.current_year = st.selectbox(
         "选择年份", years,
         index=years.index(current_year),
         key="sidebar_year"
     )
     
-    # 2. 区域/省份选择（联动）
+    # 2. 区域/省份选择（修复后）
+    # 区域选择（兜底+有效性检查）
     current_region = st.session_state.get("current_region", "总部")
     if current_region not in REGIONS.keys():
         current_region = "总部"
@@ -473,6 +503,7 @@ with st.sidebar:
     )
     st.session_state.current_region = selected_region
     
+    # 省份选择（联动区域+兜底）
     provinces = REGIONS[selected_region]
     current_province = st.session_state.get("current_province", provinces[0])
     if current_province not in provinces:
@@ -485,7 +516,7 @@ with st.sidebar:
     )
     st.session_state.current_province = selected_province
     
-    # 3. 电厂信息
+    # 3. 电厂信息（保留你原来的代码，无需修改）
     st.session_state.current_power_plant = st.text_input(
         "电厂名称",
         value=st.session_state.current_power_plant,
@@ -504,6 +535,7 @@ with st.sidebar:
         st.write("核心时段（中午，接收电量）")
         col_pv1, col_pv2 = st.columns(2)
         with col_pv1:
+            # 使用独立key，避免直接赋值session state
             st.number_input(
                 "核心起始（点）", min_value=1, max_value=24,
                 value=st.session_state["pv_core_start_key"],
@@ -531,7 +563,7 @@ with st.sidebar:
                 key="input_pv_edge_end"
             )
         
-        # 同步input值到session state
+        # 同步input值到session state（关键修复：避免直接赋值）
         st.session_state["pv_core_start_key"] = st.session_state.get("input_pv_core_start", 11)
         st.session_state["pv_core_end_key"] = st.session_state.get("input_pv_core_end", 14)
         st.session_state["pv_edge_start_key"] = st.session_state.get("input_pv_edge_start", 6)
@@ -546,43 +578,16 @@ with st.sidebar:
         - 无效时段：{pv_hours['invalid']}点
         """)
     
-    # 4. 装机容量（修复：存入Session State）
-    st.session_state.installed_capacity = st.number_input(
-        "装机容量(MW)", min_value=0.0, value=st.session_state.installed_capacity, step=0.1,
+    # 4. 装机容量
+    installed_capacity = st.number_input(
+        "装机容量(MW)", min_value=0.0, value=0.0, step=0.1,
         key="sidebar_installed_capacity", help="电厂总装机容量，单位：兆瓦"
     )
     
-    # 5. 市场化交易小时数
-    st.write("#### 市场化交易小时数")
-    auto_calculate = st.toggle(
-        "自动计算", value=st.session_state.auto_calculate,
-        key="sidebar_auto_calculate"
-    )
-    st.session_state.auto_calculate = auto_calculate
-
-    manual_market_hours = 0.0
-    if not st.session_state.auto_calculate:
-        manual_market_hours = st.number_input(
-            "手动输入（适用于所有选中月份）", min_value=0.0, max_value=1000000.0,
-            value=st.session_state.manual_market_hours, step=0.1,
-            key="sidebar_market_hours_manual"
-        )
-        st.session_state.manual_market_hours = manual_market_hours
-
-# -------------------------- 主页面内容 --------------------------
-st.title("⚡ 新能源电厂年度方案设计系统")
-scheme2_title = "套利曲线（光伏）/直线曲线（风电）"
-st.subheader(
-    f"当前配置：{st.session_state.current_year}年 | {st.session_state.current_region} | {st.session_state.current_province} | "
-    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}"
-)
-st.caption(f"方案一：典型出力曲线 | 方案二：{scheme2_title}")
-
-# -------------------------- 电量参数配置 --------------------------
-st.divider()
+    # 5. 电量参数配置（完整修改版：批量应用 + 分月修改 + 参数预览）
 st.subheader("⚡ 电量参数配置")
 
-# 1. 批量应用参数（一键同步到所有月份）
+# -------------------------- 1. 批量应用参数（一键同步到所有月份） --------------------------
 st.write("#### 批量应用（同步到所有月份）")
 col_mech1, col_mech2 = st.columns([2, 1])
 with col_mech1:
@@ -632,7 +637,7 @@ if st.button("📌 一键应用到所有月份", type="primary", key="batch_appl
         }
     st.success("✅ 已将当前参数同步到所有月份！")
 
-# 2. 分月参数调整（单独修改某月份）
+# -------------------------- 2. 分月参数调整（单独修改某月份） --------------------------
 with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
     # 选择要修改的月份
     selected_month = st.selectbox("选择要修改的月份", range(1, 13), key="month_param_sel")
@@ -691,7 +696,7 @@ with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
         }
         st.success(f"✅ 已保存{selected_month}月的参数！")
 
-    # 3. 所有月份参数预览表格
+    # -------------------------- 3. 所有月份参数预览表格（额外优化） --------------------------
     st.divider()
     st.write("#### 所有月份参数预览")
     param_preview = []
@@ -706,7 +711,33 @@ with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
     preview_df = pd.DataFrame(param_preview)
     st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-# -------------------------- 模板导出与批量导入区域 --------------------------
+# -------------------------- 6. 市场化交易小时数（保留你原来的代码，无需修改） --------------------------
+st.write("#### 市场化交易小时数")
+auto_calculate = st.toggle(
+    "自动计算", value=st.session_state.auto_calculate,
+    key="sidebar_auto_calculate"
+)
+st.session_state.auto_calculate = auto_calculate
+
+manual_market_hours = 0.0
+if not st.session_state.auto_calculate:
+    manual_market_hours = st.number_input(
+        "手动输入（适用于所有选中月份）", min_value=0.0, max_value=1000000.0,
+        value=st.session_state.manual_market_hours, step=0.1,
+        key="sidebar_market_hours_manual"
+    )
+    st.session_state.manual_market_hours = manual_market_hours
+
+# -------------------------- 主页面内容 --------------------------
+st.title("⚡ 新能源电厂年度方案设计系统")
+scheme2_title = "套利曲线（光伏）/直线曲线（风电）"
+st.subheader(
+    f"当前配置：{st.session_state.current_year}年 | {st.session_state.current_region} | {st.session_state.current_province} | "
+    f"{st.session_state.current_plant_type} | {st.session_state.current_power_plant}"
+)
+st.caption(f"方案一：典型出力曲线 | 方案二：{scheme2_title}")
+
+# 一、模板导出与批量导入区域
 st.divider()
 st.header("📤 模板导出与批量导入")
 col_import1, col_import2, col_import3 = st.columns(3)
@@ -749,7 +780,7 @@ with col_import3:
     else:
         st.warning("⚠️ 请先选择需要处理的月份")
 
-# -------------------------- 数据操作按钮 --------------------------
+# 二、数据操作按钮
 st.divider()
 st.header("🔧 数据操作")
 col_data1, col_data2, col_data3 = st.columns(3)
@@ -764,10 +795,9 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度双方案（修复：调用函数参数正确，使用Session State的装机容量）
+# 2. 生成年度双方案
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
-        installed_capacity = st.session_state.installed_capacity  # 从Session State获取
         if not st.session_state.selected_months or not st.session_state.monthly_data:
             st.warning("⚠️ 请先导入/初始化月份数据并选择月份")
         elif installed_capacity <= 0:
@@ -782,15 +812,16 @@ with col_data2:
                     total_annual = 0.0
                     
                     for month in st.session_state.selected_months:
-                        # 计算核心参数（修复：函数参数已补全，从monthly_params读取分月参数）
+                         # 计算核心参数（分月参数从monthly_params读取，无需传全局变量）
                         if st.session_state.auto_calculate:
+                            # 自动计算：调用函数时只传月份和装机容量，参数从分月配置读取
                             gh, mh = calculate_core_params_monthly(month, installed_capacity)
                         else:
-                            gh = calculate_core_params_monthly(month, installed_capacity)[0]
+                            # 手动计算：gen_hours仍按分月参数计算（限电率、机制/保障性电量），market_hours用手动输入值
+                            gh = calculate_core_params_monthly(month, installed_capacity)[0]  # 只取gen_hours
                             mh = st.session_state.manual_market_hours
                         market_hours[month] = mh   
                         gen_hours[month] = gh
-                        
                         # 方案一：典型曲线
                         typical_df, total_typical = calculate_trade_power_typical(month, mh, installed_capacity)
                         if typical_df is None:
@@ -841,7 +872,7 @@ with col_data3:
             help="请先生成年度方案"
         )
 
-# -------------------------- 选中月份数据编辑 --------------------------
+# 三、选中月份数据编辑
 if st.session_state.selected_months and st.session_state.monthly_data:
     st.divider()
     st.header("📊 选中月份数据编辑")
@@ -872,7 +903,7 @@ if st.session_state.selected_months and st.session_state.monthly_data:
         )
         st.session_state.monthly_data[edit_month] = edit_df
 
-# -------------------------- 年度方案展示 --------------------------
+# 四、年度方案展示
 if st.session_state.calculated and st.session_state.selected_months:
     st.divider()
     st.header(f"📈 {st.session_state.current_year}年度方案展示（双方案对比）")
@@ -978,8 +1009,7 @@ if st.session_state.calculated and st.session_state.selected_months:
     - 日分解电量 = 月度电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）
     - 方案一/二月度总电量保持一致，日分解电量同步匹配
     """)
-
-# -------------------------- 方案电量手动调增调减 --------------------------
+    # -------------------------- 方案电量手动调增调减（新增模块） --------------------------
 st.divider()
 st.header("✏️ 方案电量手动调增调减（总量保持不变）")
 
@@ -999,13 +1029,15 @@ if st.session_state.calculated and st.session_state.selected_months:
             key="adj_scheme_select"
         )
 
-    # 2. 获取对应方案的数据和原始发电权重
+    # 2. 获取对应方案的数据和原始发电权重（核心：用原始平均发电量做权重依据）
+    # 方案数据（方案一/方案二）
     if adj_scheme == "方案一（典型曲线）":
         scheme_df = st.session_state.trade_power_typical.get(adj_month, None)
         scheme_col = "方案一月度电量(MWh)"
     else:
         scheme_df = st.session_state.trade_power_arbitrage.get(adj_month, None)
         scheme_col = "方案二月度电量(MWh)"
+    # 原始平均发电量（来自月度基础数据，不随调整变化，保证权重稳定）
     base_df = st.session_state.monthly_data.get(adj_month, None)
 
     if scheme_df is None or scheme_df.empty or base_df is None or base_df.empty:
@@ -1019,11 +1051,11 @@ if st.session_state.calculated and st.session_state.selected_months:
         if avg_gen_total <= 0:
             st.error("❌ 该月份原始平均发电量总和为0，无法按权重分摊调整量")
         else:
-            # 保存调整前的原始数据
+            # 保存调整前的原始数据（用于计算变化量）
             old_scheme_df = scheme_df.copy()
-            total_fixed = old_scheme_df[scheme_col].sum()  # 固定总量
+            total_fixed = old_scheme_df[scheme_col].sum()  # 固定总量（调整后不变）
 
-            # 3. 显示可编辑的电量表格
+            # 3. 显示可编辑的电量表格（仅开放方案电量列编辑）
             st.write(f"### {adj_scheme} - {adj_month}月电量调整（固定总量：{total_fixed:.2f} MWh）")
             edit_df = st.data_editor(
                 scheme_df[["时段", "平均发电量(MWh)", "时段比重(%)", scheme_col]],
@@ -1033,7 +1065,7 @@ if st.session_state.calculated and st.session_state.selected_months:
                     "时段比重(%)": st.column_config.NumberColumn("时段比重(%)", disabled=True),
                     scheme_col: st.column_config.NumberColumn(
                         f"{scheme_col}（可编辑）",
-                        min_value=0.0,
+                        min_value=0.0,  # 禁止负电量
                         step=0.1,
                         format="%.2f",
                         help="修改后其他时段按「原始平均发电量权重」自动分摊调整量，总量不变"
@@ -1044,24 +1076,26 @@ if st.session_state.calculated and st.session_state.selected_months:
                 key=f"edit_adjust_scheme_{adj_month}_{adj_scheme}"
             )
 
-            # 4. 检测表格修改，自动分摊调整量
+            # 4. 检测表格修改，自动计算并分摊调整量
             if not edit_df.equals(old_scheme_df):
+                # 计算每个时段的变化量，找到修改的时段（仅支持单时段修改，避免冲突）
                 delta_series = edit_df[scheme_col] - old_scheme_df[scheme_col]
                 modified_indices = delta_series[delta_series != 0].index.tolist()
 
                 if len(modified_indices) > 1:
                     st.warning("⚠️ 暂支持单次修改1个时段，请保存当前调整后再修改其他时段！")
-                    # 恢复原始数据
+                    # 恢复原始数据，避免多时段修改导致总量混乱
                     if adj_scheme == "方案一（典型曲线）":
                         st.session_state.trade_power_typical[adj_month] = old_scheme_df
                     else:
                         st.session_state.trade_power_arbitrage[adj_month] = old_scheme_df
                 elif len(modified_indices) == 1:
-                    mod_idx = modified_indices[0]
-                    mod_hour = edit_df.loc[mod_idx, "时段"]
-                    delta = delta_series.iloc[0]
+                    # 获取修改的时段索引和变化量
+                    mod_idx = modified_indices[0]  # DataFrame行索引（对应时段1-24）
+                    mod_hour = edit_df.loc[mod_idx, "时段"]  # 修改的时段（1-24）
+                    delta = delta_series.iloc[0]  # 变化量（新值-旧值）
 
-                    # 计算其他时段的分摊权重
+                    # 计算其他时段的分摊权重（排除修改的时段）
                     other_indices = [idx for idx in range(24) if idx != mod_idx]
                     other_avg_gen = [avg_gen_list[idx] for idx in other_indices]
                     other_avg_total = sum(other_avg_gen)
@@ -1069,17 +1103,22 @@ if st.session_state.calculated and st.session_state.selected_months:
                     if other_avg_total <= 0:
                         st.error("❌ 其他时段原始平均发电量总和为0，无法分摊调整量！")
                     else:
-                        # 5. 按权重分摊调整量
+                        # 5. 按权重分摊调整量（其他时段 = 原调整后值 + 分摊量，分摊量=-delta×权重占比）
                         adjusted_df = edit_df.copy()
                         for idx in other_indices:
+                            # 该时段权重占比 = 该时段原始平均发电量 / 其他时段原始平均发电总量
                             weight_ratio = avg_gen_list[idx] / other_avg_total
+                            # 分摊调整量（负delta：调增则其他减，调减则其他加）
                             share_amount = -delta * weight_ratio
+                            # 新值 = 编辑后的值 + 分摊量（保证总量不变）
                             new_val = adjusted_df.loc[idx, scheme_col] + share_amount
+                            # 边界保护：不能小于0
                             adjusted_df.loc[idx, scheme_col] = max(round(new_val, 2), 0.0)
 
-                        # 6. 修正计算误差
+                        # 6. 修正计算误差（确保总量严格等于原始总量，避免浮点数精度问题）
                         current_total = adjusted_df[scheme_col].sum()
                         if not np.isclose(current_total, total_fixed, atol=0.01):
+                            # 最后一个其他时段兜底修正（不影响修改的时段）
                             last_other_idx = other_indices[-1]
                             correction = total_fixed - current_total
                             adjusted_df.loc[last_other_idx, scheme_col] = max(
@@ -1087,16 +1126,16 @@ if st.session_state.calculated and st.session_state.selected_months:
                                 0.0
                             )
 
-                        # 7. 更新时段比重
+                        # 7. 更新时段比重（按新电量重新计算）
                         adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
 
-                        # 8. 保存调整后的数据
+                        # 8. 保存调整后的数据到Session State（覆盖原方案数据）
                         if adj_scheme == "方案一（典型曲线）":
                             st.session_state.trade_power_typical[adj_month] = adjusted_df
                         else:
                             st.session_state.trade_power_arbitrage[adj_month] = adjusted_df
 
-                        # 9. 显示调整结果
+                        # 9. 显示调整结果反馈
                         st.success(
                             f"✅ 调整成功！\n"
                             f"- 修改时段：{mod_hour}点\n"
