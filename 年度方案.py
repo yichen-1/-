@@ -1251,7 +1251,7 @@ with col_right:
         except Exception as e:
             st.error(f"批量光伏配置设置失败：{str(e)}")
     
-    # 批量应用按钮
+        # 批量应用按钮
     col_batch_btn1, col_batch_btn2 = st.columns(2)
     with col_batch_btn1:
         if st.button("✅ 批量应用电量参数", use_container_width=True, key="batch_apply_power"):
@@ -1268,7 +1268,7 @@ with col_right:
             except Exception as e:
                 st.error(f"批量应用失败：{str(e)}")
     
-        with col_batch_btn2:
+    with col_batch_btn2:
         if plant_type == "光伏" and st.button("✅ 批量应用光伏配置", use_container_width=True, key="batch_apply_pv"):
             try:
                 batch_pv_params = {
