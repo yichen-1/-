@@ -5,6 +5,19 @@ import os
 from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+# -------------------------- 必备：区域-省份映射字典（必须定义！） --------------------------
+# 按你的实际业务需求修改省份列表，支持自定义区域
+REGIONS = {
+    "总部": ["全国", "通用"],
+    "华北区域": ["北京", "天津", "河北", "山西", "内蒙古"],
+    "东北区域": ["辽宁", "吉林", "黑龙江"],
+    "华东区域": ["上海", "江苏", "浙江", "安徽", "福建", "江西", "山东"],
+    "华中区域": ["河南", "湖北", "湖南"],
+    "华南区域": ["广东", "广西", "海南"],
+    "西南区域": ["重庆", "四川", "贵州", "云南", "西藏"],
+    "西北区域": ["陕西", "甘肃", "青海", "宁夏", "新疆"],
+    "其他区域": ["自定义省份"]
+}
 
 # -------------------------- 全局配置 & Session State 初始化 --------------------------
 st.set_page_config(
@@ -13,9 +26,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+# -------------------------- 全局配置 & Session State 初始化 --------------------------
+st.set_page_config(
+    page_title="新能源电厂年度方案设计系统",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# 初始化Session State（放在最顶部，所有widget之前）
-# 初始化Session State（放在最顶部）
 if "initialized" not in st.session_state:
     # （保留你原来的其他初始化项）
     # ...
@@ -411,52 +429,57 @@ REGIONS = {
     "内蒙古电网": ["蒙西"]
 }
 
-# -------------------------- 侧边栏配置 --------------------------
+# 侧边栏配置
 with st.sidebar:
     st.header("⚙️ 基础信息配置")
     
-    # 1. 年份选择
+    # 1. 年份选择（已修复，保留）
     years = list(range(2020, 2031))
-    # 兜底逻辑：确保current_year存在且有效
     current_year = st.session_state.get("current_year", 2025)
     if current_year not in years:
         current_year = 2025
-         # 渲染选择框
     st.session_state.current_year = st.selectbox(
         "选择年份", years,
         index=years.index(current_year),
         key="sidebar_year"
     )
     
-    # 2. 区域/省份
+    # 2. 区域/省份选择（修复后）
+    # 区域选择（兜底+有效性检查）
+    current_region = st.session_state.get("current_region", "总部")
+    if current_region not in REGIONS.keys():
+        current_region = "总部"
     selected_region = st.selectbox(
-        "选择区域", list(REGIONS.keys()),
-        index=list(REGIONS.keys()).index(st.session_state.current_region),
+        "选择区域",
+        list(REGIONS.keys()),
+        index=list(REGIONS.keys()).index(current_region),
         key="sidebar_region_select"
     )
     st.session_state.current_region = selected_region
     
-    current_province_list = REGIONS[st.session_state.current_region]
-    if not st.session_state.current_province or st.session_state.current_province not in current_province_list:
-        st.session_state.current_province = current_province_list[0]
-    
+    # 省份选择（联动区域+兜底）
+    provinces = REGIONS[selected_region]
+    current_province = st.session_state.get("current_province", provinces[0])
+    if current_province not in provinces:
+        current_province = provinces[0]
     selected_province = st.selectbox(
-        "选择省份/地区", current_province_list,
-        index=current_province_list.index(st.session_state.current_province),
+        "选择省份",
+        provinces,
+        index=provinces.index(current_province),
         key="sidebar_province_select"
     )
     st.session_state.current_province = selected_province
     
-    # 3. 电厂信息
-    plant_name = st.text_input(
-        "电厂名称", value=st.session_state.current_power_plant,
-        key="sidebar_plant_name", placeholder="如：张家口风电场/青海光伏电站"
+    # 3. 电厂信息（保留你原来的代码，无需修改）
+    st.session_state.current_power_plant = st.text_input(
+        "电厂名称",
+        value=st.session_state.current_power_plant,
+        key="sidebar_power_plant"
     )
-    st.session_state.current_power_plant = plant_name
-    
     st.session_state.current_plant_type = st.selectbox(
-        "电厂类型", ["风电", "光伏"],
-        index=["风电", "光伏"].index(st.session_state.current_plant_type),
+        "电厂类型",
+        ["风电", "光伏", "水光互补", "风光互补"],
+        index=["风电", "光伏", "水光互补", "风光互补"].index(st.session_state.current_plant_type),
         key="sidebar_plant_type"
     )
     
