@@ -192,7 +192,6 @@ def batch_import_excel(file):
         st.error(f"批量导入失败：{str(e)}")
         return None
 
-# -------------------------- 修复核心函数：参数匹配 + 安全读取分月参数 --------------------------
 def calculate_core_params_monthly(month, installed_capacity):
     """按月份计算核心参数（市场化小时数、发电小时数）- 内部读取分月参数"""
     # 安全获取该月份的分月参数（避免KeyError）
@@ -247,9 +246,11 @@ def calculate_core_params_monthly(month, installed_capacity):
 
 def calculate_trade_power_typical(month, market_hours, installed_capacity):
     """方案一：典型出力曲线（按发电权重分配）"""
+    # 先校验基础数据
     if month not in st.session_state.monthly_data:
         st.warning(f"⚠️ 月份{month}无基础数据，方案一计算失败")
         return None, 0.0
+    
     df = st.session_state.monthly_data[month]
     avg_generation_list = df["平均发电量(MWh)"].tolist()
     total_trade_power = market_hours * installed_capacity
@@ -275,12 +276,22 @@ def calculate_trade_power_typical(month, market_hours, installed_capacity):
     trade_df["电厂名称"] = st.session_state.current_power_plant
     trade_df = trade_df.fillna(0.0)
     trade_df["方案一月度电量(MWh)"] = trade_df["方案一月度电量(MWh)"].astype(np.float64)
+    
+    # 校验列是否存在（防止生成失败）
+    if "方案一月度电量(MWh)" not in trade_df.columns:
+        st.error(f"❌ 月份{month}方案一数据列缺失")
+        return None, 0.0
+    
     return trade_df, round(total_trade_power, 2)
 
 def calculate_trade_power_arbitrage(month, total_trade_power, typical_df):
     """方案二：光伏套利曲线/风电直线曲线"""
+    # 先校验基础数据和典型方案数据
     if month not in st.session_state.monthly_data:
         st.warning(f"⚠️ 月份{month}无基础数据，方案二计算失败")
+        return None
+    if typical_df is None or typical_df.empty:
+        st.warning(f"⚠️ 月份{month}典型方案数据无效，方案二计算失败")
         return None
     
     if st.session_state.current_plant_type == "光伏":
@@ -355,6 +366,11 @@ def calculate_trade_power_arbitrage(month, total_trade_power, typical_df):
     if total_trade_power > 0:
         trade_df["方案二月度电量(MWh)"] = trade_df["方案二月度电量(MWh)"] * (total_trade_power / trade_df["方案二月度电量(MWh)"].sum())
     
+    # 校验列是否存在
+    if "方案二月度电量(MWh)" not in trade_df.columns:
+        st.error(f"❌ 月份{month}方案二数据列缺失")
+        return None
+    
     return trade_df
 
 def decompose_double_scheme(typical_df, arbitrage_df, year, month):
@@ -371,18 +387,21 @@ def decompose_double_scheme(typical_df, arbitrage_df, year, month):
     df = df.fillna(0.0)
     return df
 
-# -------------------------- 修复导出函数（已优化，直接保留） --------------------------
 def export_annual_plan():
     """导出年度方案Excel（双方案月度+日分解四列数据）"""
     # 第一步：过滤有效月份（仅保留生成方案成功的月份）
     valid_months = []
     for month in st.session_state.selected_months:
-        # 校验该月份是否同时存在方案一和方案二的数据
+        # 校验该月份是否同时存在方案一和方案二的数据，且包含目标列
         if (month in st.session_state.trade_power_typical 
-            and month in st.session_state.trade_power_arbitrage):
+            and month in st.session_state.trade_power_arbitrage
+            and not st.session_state.trade_power_typical[month].empty
+            and not st.session_state.trade_power_arbitrage[month].empty
+            and "方案一月度电量(MWh)" in st.session_state.trade_power_typical[month].columns
+            and "方案二月度电量(MWh)" in st.session_state.trade_power_arbitrage[month].columns):
             valid_months.append(month)
         else:
-            st.warning(f"⚠️ 跳过无效月份 {month}月（方案数据未生成或生成失败）")
+            st.warning(f"⚠️ 跳过无效月份 {month}月（方案数据未生成或列缺失）")
     
     if not valid_months:
         st.error("❌ 无有效方案数据可导出，请先确保所有选中月份的方案生成成功！")
@@ -399,22 +418,8 @@ def export_annual_plan():
     
     # 循环有效月份（而非全部选中月份）
     for month in valid_months:
-        # 安全访问：确保数据存在（双重保险）
-        typical_df = st.session_state.trade_power_typical.get(month, None)
-        arbitrage_df = st.session_state.trade_power_arbitrage.get(month, None)
-        if typical_df is None or arbitrage_df is None:
-            st.warning(f"⚠️ 月份 {month}月 数据异常，跳过导出")
-            continue
-        
-        # 校验必要列是否存在（避免列名错误导致的KeyError）
-        required_cols_typical = ["时段", "方案一月度电量(MWh)"]
-        required_cols_arbitrage = ["时段", "方案二月度电量(MWh)"]
-        if not all(col in typical_df.columns for col in required_cols_typical):
-            st.warning(f"⚠️ 月份 {month}月 方案一缺少必要列，跳过导出")
-            continue
-        if not all(col in arbitrage_df.columns for col in required_cols_arbitrage):
-            st.warning(f"⚠️ 月份 {month}月 方案二缺少必要列，跳过导出")
-            continue
+        typical_df = st.session_state.trade_power_typical[month]
+        arbitrage_df = st.session_state.trade_power_arbitrage[month]
         
         total_typical = typical_df["方案一月度电量(MWh)"].sum()
         total_arbitrage = arbitrage_df["方案二月度电量(MWh)"].sum()
@@ -841,7 +846,7 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度双方案
+# 2. 生成年度双方案（重点修复：严格过滤无效数据）
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
         if not st.session_state.selected_months or not st.session_state.monthly_data:
@@ -856,6 +861,7 @@ with col_data2:
                     market_hours = {}
                     gen_hours = {}
                     total_annual = 0.0
+                    valid_calculated_months = []  # 记录成功计算的月份
                     
                     for month in st.session_state.selected_months:
                         # 计算核心参数（仅传2个参数，内部读取分月参数）
@@ -863,46 +869,60 @@ with col_data2:
                             gh, mh = calculate_core_params_monthly(month, st.session_state.installed_capacity)
                         else:
                             # 手动模式：发电小时数按分月参数计算，市场化小时数用手动输入
-                            gh = calculate_core_params_monthly(month, st.session_state.installed_capacity)[0]
+                            gh, _ = calculate_core_params_monthly(month, st.session_state.installed_capacity)
                             mh = st.session_state.manual_market_hours
+                        
+                        # 校验市场化小时数有效性
+                        if mh <= 0:
+                            st.warning(f"⚠️ 月份{month}市场化小时数为0，跳过该月份")
+                            continue
                         
                         market_hours[month] = mh   
                         gen_hours[month] = gh
                         
-                        # 方案一：典型曲线
+                        # 方案一：典型曲线（校验返回结果）
                         typical_df, total_typical = calculate_trade_power_typical(month, mh, st.session_state.installed_capacity)
-                        if typical_df is None:
-                            st.error(f"❌ 月份{month}典型方案计算失败")
+                        if typical_df is None or typical_df.empty or "方案一月度电量(MWh)" not in typical_df.columns:
+                            st.error(f"❌ 月份{month}典型方案计算失败，跳过该月份")
                             continue
-                        trade_typical[month] = typical_df
-                        total_annual += total_typical
                         
-                        # 方案二：光伏套利/风电直线
+                        # 方案二：光伏套利/风电直线（校验返回结果）
                         arbitrage_df = calculate_trade_power_arbitrage(month, total_typical, typical_df)
-                        if arbitrage_df is None:
-                            st.error(f"❌ 月份{month}方案二计算失败")
+                        if arbitrage_df is None or arbitrage_df.empty or "方案二月度电量(MWh)" not in arbitrage_df.columns:
+                            st.error(f"❌ 月份{month}方案二计算失败，跳过该月份")
                             continue
+                        
+                        # 只有两个方案都成功才存入会话状态
+                        trade_typical[month] = typical_df
                         trade_arbitrage[month] = arbitrage_df
+                        total_annual += total_typical
+                        valid_calculated_months.append(month)
                     
-                    # 保存到session_state
-                    st.session_state.trade_power_typical = trade_typical
-                    st.session_state.trade_power_arbitrage = trade_arbitrage
-                    st.session_state.market_hours = market_hours
-                    st.session_state.gen_hours = gen_hours
-                    st.session_state.total_annual_trade = total_annual
-                    st.session_state.calculated = True
+                    # 只有有有效计算结果才更新会话状态
+                    if valid_calculated_months:
+                        st.session_state.trade_power_typical = trade_typical
+                        st.session_state.trade_power_arbitrage = trade_arbitrage
+                        st.session_state.market_hours = market_hours
+                        st.session_state.gen_hours = gen_hours
+                        st.session_state.total_annual_trade = total_annual
+                        st.session_state.calculated = True
+                        
+                        st.success(
+                            f"✅ 年度双方案生成成功！\n"
+                            f"成功计算月份：{', '.join([f'{m}月' for m in valid_calculated_months])}\n"
+                            f"年度总交易电量：{round(total_annual, 2)} MWh"
+                        )
+                    else:
+                        st.error("❌ 所有选中月份的方案计算均失败，请检查基础数据和参数配置！")
+                        st.session_state.calculated = False  # 标记为未计算成功
                     
-                    st.success(
-                        f"✅ 年度双方案生成成功！\n"
-                        f"年度总交易电量：{round(total_annual, 2)} MWh\n"
-                        f"涉及月份：{', '.join([f'{m}月' for m in st.session_state.selected_months])}"
-                    )
                 except Exception as e:
                     st.error(f"❌ 生成方案失败：{str(e)}")
+                    st.session_state.calculated = False
 
 # 3. 导出年度方案
 with col_data3:
-    if st.session_state.calculated and st.session_state.selected_months:
+    if st.session_state.calculated and st.session_state.trade_power_typical:
         annual_output = export_annual_plan()
         if annual_output:  # 确保有有效数据才显示下载按钮
             st.download_button(
@@ -917,7 +937,7 @@ with col_data3:
             "💾 导出年度方案（双方案+日分解）",
             use_container_width=True,
             disabled=True,
-            help="请先生成年度方案"
+            help="请先生成有效的年度方案"
         )
 
 # 三、选中月份数据编辑
@@ -951,236 +971,270 @@ if st.session_state.selected_months and st.session_state.monthly_data:
         )
         st.session_state.monthly_data[edit_month] = edit_df
 
-# 四、年度方案展示
-if st.session_state.calculated and st.session_state.selected_months:
+# 四、年度方案展示（重点修复：只展示有效月份）
+if st.session_state.calculated and st.session_state.trade_power_typical:
     st.divider()
     st.header(f"📈 {st.session_state.current_year}年度方案展示（双方案对比）")
     
-    # 1. 年度汇总
-    st.subheader("1. 年度汇总")
-    summary_data = []
-    scheme2_note = "套利曲线" if st.session_state.current_plant_type == "光伏" else "直线曲线"
-    for month in st.session_state.selected_months:
-        typical_total = st.session_state.trade_power_typical[month]["方案一月度电量(MWh)"].sum()
-        arbitrage_total = st.session_state.trade_power_arbitrage[month]["方案二月度电量(MWh)"].sum()
-        days = get_days_in_month(st.session_state.current_year, month)
-        summary_data.append({
-            "月份": f"{month}月",
-            "月份天数": days,
-            "市场化小时数": st.session_state.market_hours[month],
-            "预估发电小时数": st.session_state.gen_hours[month],
-            "方案一总电量(MWh)": typical_total,
-            "方案二总电量(MWh)": arbitrage_total,
-            "方案二类型": scheme2_note,
-            "占年度比重(%)": round(typical_total / st.session_state.total_annual_trade * 100, 2)
-        })
-    summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    st.metric("年度总交易电量（方案一）", f"{st.session_state.total_annual_trade:.2f} MWh")
+    # 过滤有效展示月份（存在于两个方案中且列名齐全）
+    valid_display_months = [
+        month for month in st.session_state.selected_months
+        if month in st.session_state.trade_power_typical
+        and month in st.session_state.trade_power_arbitrage
+        and not st.session_state.trade_power_typical[month].empty
+        and not st.session_state.trade_power_arbitrage[month].empty
+        and "方案一月度电量(MWh)" in st.session_state.trade_power_typical[month].columns
+        and "方案二月度电量(MWh)" in st.session_state.trade_power_arbitrage[month].columns
+    ]
     
-    # 2. 月份方案详情
-    st.subheader("2. 月份方案详情（双方案对比）")
-    view_month = st.selectbox(
-        "选择查看的月份",
-        st.session_state.selected_months,
-        key="view_month_select"
-    )
-    
-    # 方案一展示
-    st.write(f"### 方案一：典型出力曲线（{view_month}月）")
-    typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案一月度电量(MWh)"]].copy()
-    typical_df = typical_df.fillna(0.0)
-    typical_df["方案一月度电量(MWh)"] = typical_df["方案一月度电量(MWh)"].astype(np.float64)
-    typical_df = typical_df.reset_index(drop=True)
-    st.dataframe(typical_df, use_container_width=True, hide_index=True)
-    
-    try:
-        chart_data = typical_df[["时段", "方案一月度电量(MWh)"]].set_index("时段")
-        if not chart_data.empty and chart_data["方案一月度电量(MWh)"].sum() > 0:
-            st.write(f"#### {view_month}月方案一电量分布")
-            st.bar_chart(chart_data, use_container_width=True)
-        else:
-            st.info("⚠️ 暂无有效数据生成图表")
-    except Exception as e:
-        st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
-    
-    # 方案二展示
-    st.write(f"### 方案二：{scheme2_note}（{view_month}月）")
-    arbitrage_df = st.session_state.trade_power_arbitrage[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案二月度电量(MWh)"]].copy()
-    arbitrage_df = arbitrage_df.fillna(0.0)
-    arbitrage_df["方案二月度电量(MWh)"] = arbitrage_df["方案二月度电量(MWh)"].astype(np.float64)
-    arbitrage_df = arbitrage_df.reset_index(drop=True)
-    st.dataframe(arbitrage_df, use_container_width=True, hide_index=True)
-    
-    # 方案二说明
-    if st.session_state.current_plant_type == "光伏":
-        pv_hours = get_pv_arbitrage_hours()
-        edge_total = typical_df[typical_df["时段"].isin(pv_hours["edge"])]["方案一月度电量(MWh)"].sum()
-        core_avg_add = edge_total / len(pv_hours["core"]) if len(pv_hours["core"]) > 0 else 0
-        st.info(f"""
-        光伏套利曲线说明：
-        - 转出时段：{pv_hours['edge']}点（总转出电量={edge_total:.2f} MWh）
-        - 接收时段：{pv_hours['core']}点（每时段增加={core_avg_add:.2f} MWh）
-        - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
-        """)
+    if not valid_display_months:
+        st.warning("⚠️ 无有效方案数据可展示，请重新生成方案")
     else:
-        st.info(f"""
-        风电直线曲线说明：
-        - 24时段平均分配，每时段电量={arbitrage_df['方案二月度电量(MWh)'].iloc[0]:.2f} MWh
-        - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
-        """)
-    
-    try:
-        chart_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].set_index("时段")
-        if not chart_data.empty and chart_data["方案二月度电量(MWh)"].sum() > 0:
-            st.write(f"#### {view_month}月方案二电量分布")
-            st.bar_chart(chart_data, use_container_width=True)
+        # 1. 年度汇总
+        st.subheader("1. 年度汇总")
+        summary_data = []
+        scheme2_note = "套利曲线" if st.session_state.current_plant_type == "光伏" else "直线曲线"
+        for month in valid_display_months:
+            typical_df = st.session_state.trade_power_typical[month]
+            arbitrage_df = st.session_state.trade_power_arbitrage[month]
+            
+            typical_total = typical_df["方案一月度电量(MWh)"].sum()
+            arbitrage_total = arbitrage_df["方案二月度电量(MWh)"].sum()
+            days = get_days_in_month(st.session_state.current_year, month)
+            summary_data.append({
+                "月份": f"{month}月",
+                "月份天数": days,
+                "市场化小时数": st.session_state.market_hours.get(month, 0.0),
+                "预估发电小时数": st.session_state.gen_hours.get(month, 0.0),
+                "方案一总电量(MWh)": typical_total,
+                "方案二总电量(MWh)": arbitrage_total,
+                "方案二类型": scheme2_note,
+                "占年度比重(%)": round(typical_total / st.session_state.total_annual_trade * 100, 2)
+            })
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.metric("年度总交易电量（方案一）", f"{st.session_state.total_annual_trade:.2f} MWh")
+        
+        # 2. 月份方案详情
+        st.subheader("2. 月份方案详情（双方案对比）")
+        view_month = st.selectbox(
+            "选择查看的月份",
+            valid_display_months,
+            key="view_month_select"
+        )
+        
+        # 方案一展示
+        st.write(f"### 方案一：典型出力曲线（{view_month}月）")
+        typical_df = st.session_state.trade_power_typical[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案一月度电量(MWh)"]].copy()
+        typical_df = typical_df.fillna(0.0)
+        typical_df["方案一月度电量(MWh)"] = typical_df["方案一月度电量(MWh)"].astype(np.float64)
+        typical_df = typical_df.reset_index(drop=True)
+        st.dataframe(typical_df, use_container_width=True, hide_index=True)
+        
+        try:
+            chart_data = typical_df[["时段", "方案一月度电量(MWh)"]].set_index("时段")
+            if not chart_data.empty and chart_data["方案一月度电量(MWh)"].sum() > 0:
+                st.write(f"#### {view_month}月方案一电量分布")
+                st.bar_chart(chart_data, use_container_width=True)
+            else:
+                st.info("⚠️ 暂无有效数据生成图表")
+        except Exception as e:
+            st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
+        
+        # 方案二展示
+        st.write(f"### 方案二：{scheme2_note}（{view_month}月）")
+        arbitrage_df = st.session_state.trade_power_arbitrage[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案二月度电量(MWh)"]].copy()
+        arbitrage_df = arbitrage_df.fillna(0.0)
+        arbitrage_df["方案二月度电量(MWh)"] = arbitrage_df["方案二月度电量(MWh)"].astype(np.float64)
+        arbitrage_df = arbitrage_df.reset_index(drop=True)
+        st.dataframe(arbitrage_df, use_container_width=True, hide_index=True)
+        
+        # 方案二说明
+        if st.session_state.current_plant_type == "光伏":
+            pv_hours = get_pv_arbitrage_hours()
+            edge_total = typical_df[typical_df["时段"].isin(pv_hours["edge"])]["方案一月度电量(MWh)"].sum()
+            core_avg_add = edge_total / len(pv_hours["core"]) if len(pv_hours["core"]) > 0 else 0
+            st.info(f"""
+            光伏套利曲线说明：
+            - 转出时段：{pv_hours['edge']}点（总转出电量={edge_total:.2f} MWh）
+            - 接收时段：{pv_hours['core']}点（每时段增加={core_avg_add:.2f} MWh）
+            - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
+            """)
         else:
-            st.info("⚠️ 暂无有效数据生成图表")
-    except Exception as e:
-        st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
-    
-    # 3. 双方案日分解展示（四列数据）
-    st.subheader(f"3. {view_month}月双方案日分解电量（四列数据）")
-    decompose_df = decompose_double_scheme(
-        st.session_state.trade_power_typical[view_month],
-        st.session_state.trade_power_arbitrage[view_month],
-        st.session_state.current_year,
-        view_month
-    )
-    decompose_df = decompose_df.fillna(0.0)
-    # 显示四列核心数据
-    display_df = decompose_df[["时段", "方案一月度电量(MWh)", "方案一日分解电量(MWh)", "方案二月度电量(MWh)", "方案二日分解电量(MWh)"]].copy()
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-    st.info(f"""
-    日分解说明：
-    - 日分解电量 = 月度电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）
-    - 方案一/二月度总电量保持一致，日分解电量同步匹配
-    """)
+            st.info(f"""
+            风电直线曲线说明：
+            - 24时段平均分配，每时段电量={arbitrage_df['方案二月度电量(MWh)'].iloc[0]:.2f} MWh
+            - 总电量：{arbitrage_df['方案二月度电量(MWh)'].sum():.2f} MWh（与方案一一致）
+            """)
+        
+        try:
+            chart_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].set_index("时段")
+            if not chart_data.empty and chart_data["方案二月度电量(MWh)"].sum() > 0:
+                st.write(f"#### {view_month}月方案二电量分布")
+                st.bar_chart(chart_data, use_container_width=True)
+            else:
+                st.info("⚠️ 暂无有效数据生成图表")
+        except Exception as e:
+            st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
+        
+        # 3. 双方案日分解展示（四列数据）
+        st.subheader(f"3. {view_month}月双方案日分解电量（四列数据）")
+        decompose_df = decompose_double_scheme(
+            st.session_state.trade_power_typical[view_month],
+            st.session_state.trade_power_arbitrage[view_month],
+            st.session_state.current_year,
+            view_month
+        )
+        decompose_df = decompose_df.fillna(0.0)
+        # 显示四列核心数据
+        display_df = decompose_df[["时段", "方案一月度电量(MWh)", "方案一日分解电量(MWh)", "方案二月度电量(MWh)", "方案二日分解电量(MWh)"]].copy()
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.info(f"""
+        日分解说明：
+        - 日分解电量 = 月度电量 ÷ {view_month}月天数（{get_days_in_month(st.session_state.current_year, view_month)}天）
+        - 方案一/二月度总电量保持一致，日分解电量同步匹配
+        """)
+else:
+    if st.session_state.calculated and not st.session_state.trade_power_typical:
+        st.warning("⚠️ 无有效方案数据，请重新生成方案")
 
 # -------------------------- 方案电量手动调增调减（新增模块） --------------------------
 st.divider()
 st.header("✏️ 方案电量手动调增调减（总量保持不变）")
 
-if st.session_state.calculated and st.session_state.selected_months:
-    # 1. 选择调整的月份和方案
-    col_adj1, col_adj2 = st.columns(2)
-    with col_adj1:
-        adj_month = st.selectbox(
-            "选择要调整的月份",
-            st.session_state.selected_months,
-            key="adj_month_select"
-        )
-    with col_adj2:
-        adj_scheme = st.selectbox(
-            "选择要调整的方案",
-            ["方案一（典型曲线）", "方案二（套利/直线曲线）"],
-            key="adj_scheme_select"
-        )
-
-    # 2. 获取对应方案的数据和原始发电权重
-    if adj_scheme == "方案一（典型曲线）":
-        scheme_df = st.session_state.trade_power_typical.get(adj_month, None)
-        scheme_col = "方案一月度电量(MWh)"
+if st.session_state.calculated and st.session_state.trade_power_typical:
+    # 过滤有效调整月份
+    valid_adjust_months = [
+        month for month in st.session_state.selected_months
+        if month in st.session_state.trade_power_typical
+        and month in st.session_state.trade_power_arbitrage
+        and not st.session_state.trade_power_typical[month].empty
+        and not st.session_state.trade_power_arbitrage[month].empty
+        and "方案一月度电量(MWh)" in st.session_state.trade_power_typical[month].columns
+        and "方案二月度电量(MWh)" in st.session_state.trade_power_arbitrage[month].columns
+    ]
+    
+    if not valid_adjust_months:
+        st.warning("⚠️ 无有效方案数据可调整，请重新生成方案")
     else:
-        scheme_df = st.session_state.trade_power_arbitrage.get(adj_month, None)
-        scheme_col = "方案二月度电量(MWh)"
-    base_df = st.session_state.monthly_data.get(adj_month, None)
-
-    if scheme_df is None or scheme_df.empty or base_df is None or base_df.empty:
-        st.warning("⚠️ 该月份方案数据缺失，请重新生成方案")
-    else:
-        avg_gen_list = base_df["平均发电量(MWh)"].tolist()
-        avg_gen_total = sum(avg_gen_list)
-        
-        if avg_gen_total <= 0:
-            st.error("❌ 该月份原始平均发电量总和为0，无法按权重分摊调整量")
-        else:
-            old_scheme_df = scheme_df.copy()
-            total_fixed = old_scheme_df[scheme_col].sum()
-
-            # 3. 显示可编辑的电量表格
-            st.write(f"### {adj_scheme} - {adj_month}月电量调整（固定总量：{total_fixed:.2f} MWh）")
-            edit_df = st.data_editor(
-                scheme_df[["时段", "平均发电量(MWh)", "时段比重(%)", scheme_col]],
-                column_config={
-                    "时段": st.column_config.NumberColumn("时段", disabled=True),
-                    "平均发电量(MWh)": st.column_config.NumberColumn("原始平均发电量(MWh)", disabled=True),
-                    "时段比重(%)": st.column_config.NumberColumn("时段比重(%)", disabled=True),
-                    scheme_col: st.column_config.NumberColumn(
-                        f"{scheme_col}（可编辑）",
-                        min_value=0.0,
-                        step=0.1,
-                        format="%.2f",
-                        help="修改后其他时段按「原始平均发电量权重」自动分摊调整量，总量不变"
-                    )
-                },
-                use_container_width=True,
-                num_rows="fixed",
-                key=f"edit_adjust_scheme_{adj_month}_{adj_scheme}"
+        # 1. 选择调整的月份和方案
+        col_adj1, col_adj2 = st.columns(2)
+        with col_adj1:
+            adj_month = st.selectbox(
+                "选择要调整的月份",
+                valid_adjust_months,
+                key="adj_month_select"
+            )
+        with col_adj2:
+            adj_scheme = st.selectbox(
+                "选择要调整的方案",
+                ["方案一（典型曲线）", "方案二（套利/直线曲线）"],
+                key="adj_scheme_select"
             )
 
-            # 4. 检测修改并自动分摊调整量
-            if not edit_df.equals(old_scheme_df):
-                delta_series = edit_df[scheme_col] - old_scheme_df[scheme_col]
-                modified_indices = delta_series[delta_series != 0].index.tolist()
+        # 2. 获取对应方案的数据和原始发电权重
+        if adj_scheme == "方案一（典型曲线）":
+            scheme_df = st.session_state.trade_power_typical.get(adj_month, None)
+            scheme_col = "方案一月度电量(MWh)"
+        else:
+            scheme_df = st.session_state.trade_power_arbitrage.get(adj_month, None)
+            scheme_col = "方案二月度电量(MWh)"
+        base_df = st.session_state.monthly_data.get(adj_month, None)
 
-                if len(modified_indices) > 1:
-                    st.warning("⚠️ 暂支持单次修改1个时段，请保存当前调整后再修改其他时段！")
-                    # 恢复原始数据
-                    if adj_scheme == "方案一（典型曲线）":
-                        st.session_state.trade_power_typical[adj_month] = old_scheme_df
-                    else:
-                        st.session_state.trade_power_arbitrage[adj_month] = old_scheme_df
-                elif len(modified_indices) == 1:
-                    mod_idx = modified_indices[0]
-                    mod_hour = edit_df.loc[mod_idx, "时段"]
-                    delta = delta_series.iloc[0]
+        if scheme_df is None or scheme_df.empty or base_df is None or base_df.empty:
+            st.warning("⚠️ 该月份方案数据缺失，请重新生成方案")
+        else:
+            avg_gen_list = base_df["平均发电量(MWh)"].tolist()
+            avg_gen_total = sum(avg_gen_list)
+            
+            if avg_gen_total <= 0:
+                st.error("❌ 该月份原始平均发电量总和为0，无法按权重分摊调整量")
+            else:
+                old_scheme_df = scheme_df.copy()
+                total_fixed = old_scheme_df[scheme_col].sum()
 
-                    # 计算其他时段分摊权重
-                    other_indices = [idx for idx in range(24) if idx != mod_idx]
-                    other_avg_gen = [avg_gen_list[idx] for idx in other_indices]
-                    other_avg_total = sum(other_avg_gen)
-
-                    if other_avg_total <= 0:
-                        st.error("❌ 其他时段原始平均发电量总和为0，无法分摊调整量！")
-                    else:
-                        # 分摊调整量
-                        adjusted_df = edit_df.copy()
-                        for idx in other_indices:
-                            weight_ratio = avg_gen_list[idx] / other_avg_total
-                            share_amount = -delta * weight_ratio
-                            new_val = adjusted_df.loc[idx, scheme_col] + share_amount
-                            adjusted_df.loc[idx, scheme_col] = max(round(new_val, 2), 0.0)
-
-                        # 修正浮点数误差
-                        current_total = adjusted_df[scheme_col].sum()
-                        if not np.isclose(current_total, total_fixed, atol=0.01):
-                            last_other_idx = other_indices[-1]
-                            correction = total_fixed - current_total
-                            adjusted_df.loc[last_other_idx, scheme_col] = max(
-                                round(adjusted_df.loc[last_other_idx, scheme_col] + correction, 2),
-                                0.0
-                            )
-
-                        # 更新时段比重
-                        adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
-
-                        # 保存调整后的数据
-                        if adj_scheme == "方案一（典型曲线）":
-                            st.session_state.trade_power_typical[adj_month] = adjusted_df
-                        else:
-                            st.session_state.trade_power_arbitrage[adj_month] = adjusted_df
-
-                        # 反馈结果
-                        st.success(
-                            f"✅ 调整成功！\n"
-                            f"- 修改时段：{mod_hour}点\n"
-                            f"- 电量变化：{delta:.2f} MWh（原：{old_scheme_df.loc[mod_idx, scheme_col]:.2f} → 新：{adjusted_df.loc[mod_idx, scheme_col]:.2f}）\n"
-                            f"- 其他时段按「原始平均发电量权重」自动分摊，总量保持 {total_fixed:.2f} MWh"
+                # 3. 显示可编辑的电量表格
+                st.write(f"### {adj_scheme} - {adj_month}月电量调整（固定总量：{total_fixed:.2f} MWh）")
+                edit_df = st.data_editor(
+                    scheme_df[["时段", "平均发电量(MWh)", "时段比重(%)", scheme_col]],
+                    column_config={
+                        "时段": st.column_config.NumberColumn("时段", disabled=True),
+                        "平均发电量(MWh)": st.column_config.NumberColumn("原始平均发电量(MWh)", disabled=True),
+                        "时段比重(%)": st.column_config.NumberColumn("时段比重(%)", disabled=True),
+                        scheme_col: st.column_config.NumberColumn(
+                            f"{scheme_col}（可编辑）",
+                            min_value=0.0,
+                            step=0.1,
+                            format="%.2f",
+                            help="修改后其他时段按「原始平均发电量权重」自动分摊调整量，总量不变"
                         )
-                else:
-                    st.info("ℹ️ 未检测到有效修改（请直接编辑「可编辑」列的电量值）")
+                    },
+                    use_container_width=True,
+                    num_rows="fixed",
+                    key=f"edit_adjust_scheme_{adj_month}_{adj_scheme}"
+                )
+
+                # 4. 检测修改并自动分摊调整量
+                if not edit_df.equals(old_scheme_df):
+                    delta_series = edit_df[scheme_col] - old_scheme_df[scheme_col]
+                    modified_indices = delta_series[delta_series != 0].index.tolist()
+
+                    if len(modified_indices) > 1:
+                        st.warning("⚠️ 暂支持单次修改1个时段，请保存当前调整后再修改其他时段！")
+                        # 恢复原始数据
+                        if adj_scheme == "方案一（典型曲线）":
+                            st.session_state.trade_power_typical[adj_month] = old_scheme_df
+                        else:
+                            st.session_state.trade_power_arbitrage[adj_month] = old_scheme_df
+                    elif len(modified_indices) == 1:
+                        mod_idx = modified_indices[0]
+                        mod_hour = edit_df.loc[mod_idx, "时段"]
+                        delta = delta_series.iloc[0]
+
+                        # 计算其他时段分摊权重
+                        other_indices = [idx for idx in range(24) if idx != mod_idx]
+                        other_avg_gen = [avg_gen_list[idx] for idx in other_indices]
+                        other_avg_total = sum(other_avg_gen)
+
+                        if other_avg_total <= 0:
+                            st.error("❌ 其他时段原始平均发电量总和为0，无法分摊调整量！")
+                        else:
+                            # 分摊调整量
+                            adjusted_df = edit_df.copy()
+                            for idx in other_indices:
+                                weight_ratio = avg_gen_list[idx] / other_avg_total
+                                share_amount = -delta * weight_ratio
+                                new_val = adjusted_df.loc[idx, scheme_col] + share_amount
+                                adjusted_df.loc[idx, scheme_col] = max(round(new_val, 2), 0.0)
+
+                            # 修正浮点数误差
+                            current_total = adjusted_df[scheme_col].sum()
+                            if not np.isclose(current_total, total_fixed, atol=0.01):
+                                last_other_idx = other_indices[-1]
+                                correction = total_fixed - current_total
+                                adjusted_df.loc[last_other_idx, scheme_col] = max(
+                                    round(adjusted_df.loc[last_other_idx, scheme_col] + correction, 2),
+                                    0.0
+                                )
+
+                            # 更新时段比重
+                            adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
+
+                            # 保存调整后的数据
+                            if adj_scheme == "方案一（典型曲线）":
+                                st.session_state.trade_power_typical[adj_month] = adjusted_df
+                            else:
+                                st.session_state.trade_power_arbitrage[adj_month] = adjusted_df
+
+                            # 反馈结果
+                            st.success(
+                                f"✅ 调整成功！\n"
+                                f"- 修改时段：{mod_hour}点\n"
+                                f"- 电量变化：{delta:.2f} MWh（原：{old_scheme_df.loc[mod_idx, scheme_col]:.2f} → 新：{adjusted_df.loc[mod_idx, scheme_col]:.2f}）\n"
+                                f"- 其他时段按「原始平均发电量权重」自动分摊，总量保持 {total_fixed:.2f} MWh"
+                            )
+                    else:
+                        st.info("ℹ️ 未检测到有效修改（请直接编辑「可编辑」列的电量值）")
 else:
     st.warning("⚠️ 请先生成年度方案后再进行电量调整")
 
