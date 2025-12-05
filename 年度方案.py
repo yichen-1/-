@@ -6,7 +6,7 @@ from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-# -------------------------- 初始化配置 --------------------------
+# -------------------------- 全局配置 & Session State 初始化 --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
@@ -14,27 +14,52 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化Session State（适配新需求）
+# 初始化Session State（放在最顶部，所有widget之前）
 if "initialized" not in st.session_state:
+    # 基础配置
     st.session_state.initialized = True
-    st.session_state.site_data = {}
     st.session_state.current_region = "总部"
     st.session_state.current_province = ""
-    st.session_state.current_year = 2025  # 新增：年份
-    st.session_state.current_power_plant = ""  # 修改：站点→电厂
-    st.session_state.current_plant_type = "风电"  # 新增：电厂类型（风电/光伏）
-    st.session_state.monthly_data = {}  # 新增：存储各月份数据（key:月份，value:DataFrame）
-    st.session_state.selected_months = []  # 新增：多选月份
-    st.session_state.trade_power_typical = {}  # 新增：典型出力曲线方案（分月份）
-    st.session_state.trade_power_linear = {}   # 新增：直线方案（平均分配，分月份）
-    st.session_state.total_annual_trade = 0.0  # 新增：年度总交易电量
-    st.session_state.mechanism_mode = "小时数"
-    st.session_state.guaranteed_mode = "小时数"
-    st.session_state.manual_market_hours = 0.0
+    st.session_state.current_year = 2025
+    st.session_state.current_power_plant = ""
+    st.session_state.current_plant_type = "风电"
+    
+    # 光伏套利时段配置（独立key，避免直接赋值冲突）
+    st.session_state["pv_core_start_key"] = 11   # 中午核心时段起始
+    st.session_state["pv_core_end_key"] = 14     # 中午核心时段结束
+    st.session_state["pv_edge_start_key"] = 6    # 两端边缘时段起始
+    st.session_state["pv_edge_end_key"] = 18     # 两端边缘时段结束
+    
+    # 业务数据
+    st.session_state.monthly_data = {}
+    st.session_state.selected_months = []
+    st.session_state.trade_power_typical = {}  # 方案一：典型曲线
+    st.session_state.trade_power_arbitrage = {} # 方案二：光伏套利/风电直线
+    st.session_state.total_annual_trade = 0.0
     st.session_state.auto_calculate = True
     st.session_state.calculated = False
-    st.session_state.market_hours = {}  # 分月份市场化小时数
-    st.session_state.gen_hours = {}     # 分月份预估发电小时数
+    st.session_state.market_hours = {}
+    st.session_state.gen_hours = {}
+    
+    # -------------------------- 新增：分月参数 + 批量应用参数初始化 --------------------------
+    # 分月电量参数（1-12月，每个月独立存储）
+    st.session_state.monthly_params = {
+        month: {
+            "mechanism_mode": "小时数",    # 机制电量输入模式
+            "mechanism_value": 0.0,        # 机制电量数值
+            "guaranteed_mode": "小时数",   # 保障性电量输入模式
+            "guaranteed_value": 0.0,       # 保障性电量数值
+            "power_limit_rate": 0.0        # 限电率(%)
+        } for month in range(1, 13)
+    }
+    
+    # 批量应用的默认参数（用于批量设置时的初始值）
+    st.session_state.batch_mech_mode = "小时数"      # 批量-机制电量模式
+    st.session_state.batch_mech_value = 0.0          # 批量-机制电量数值
+    st.session_state.batch_gua_mode = "小时数"       # 批量-保障性电量模式
+    st.session_state.batch_gua_value = 0.0           # 批量-保障性电量数值
+    st.session_state.batch_limit_rate = 0.0          # 批量-限电率
+    st.session_state.manual_market_hours = 0.0       # 手动市场化小时数（保留原变量）
 
 # -------------------------- 核心工具函数 --------------------------
 def get_days_in_month(year, month):
