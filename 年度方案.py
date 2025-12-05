@@ -417,9 +417,14 @@ with st.sidebar:
     
     # 1. 年份选择
     years = list(range(2020, 2031))
+    # 兜底逻辑：确保current_year存在且有效
+    current_year = st.session_state.get("current_year", 2025)
+    if current_year not in years:
+        current_year = 2025
+         # 渲染选择框
     st.session_state.current_year = st.selectbox(
         "选择年份", years,
-        index=years.index(st.session_state.current_year),
+        index=years.index(current_year),
         key="sidebar_year"
     )
     
