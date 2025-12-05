@@ -1268,11 +1268,132 @@ with col_right:
             except Exception as e:
                 st.error(f"批量应用失败：{str(e)}")
     
-    with col_batch_btn2:
+        with col_batch_btn2:
         if plant_type == "光伏" and st.button("✅ 批量应用光伏配置", use_container_width=True, key="batch_apply_pv"):
             try:
                 batch_pv_params = {
                     "core_start": st.session_state.batch_pv_core_start,
                     "core_end": st.session_state.batch_pv_core_end,
                     "edge_start": st.session_state.batch_pv_edge_start,
-                    "edge
+                    "edge_end": st.session_state.batch_pv_edge_end
+                }
+                # 验证时段合理性（核心起始≤核心结束，边缘起始≤边缘结束）
+                if batch_pv_params["core_start"] > batch_pv_params["core_end"]:
+                    st.warning("⚠️ 核心起始时段不能大于核心结束时段，已自动交换")
+                    batch_pv_params["core_start"], batch_pv_params["core_end"] = batch_pv_params["core_end"], batch_pv_params["core_start"]
+                if batch_pv_params["edge_start"] > batch_pv_params["edge_end"]:
+                    st.warning("⚠️ 边缘起始时段不能大于边缘结束时段，已自动交换")
+                    batch_pv_params["edge_start"], batch_pv_params["edge_end"] = batch_pv_params["edge_end"], batch_pv_params["edge_start"]
+                
+                # 应用到所有月份
+                for month in range(1, 13):
+                    st.session_state.monthly_pv_params[month] = batch_pv_params.copy()
+                st.success("✅ 光伏配置已同步到所有月份！")
+            except Exception as e:
+                st.error(f"批量应用失败：{str(e)}")
+
+    # 三、分月详细配置（电量参数+光伏配置）
+    st.divider()
+    st.subheader("📝 分月详细配置")
+    try:
+        config_month = st.selectbox("选择配置月份", list(range(1, 13)), key="config_month_select")
+        
+        # 1. 分月电量参数配置
+        st.write(f"### {config_month}月 - 电量参数")
+        col_cfg1, col_cfg2 = st.columns([2, 1])
+        with col_cfg1:
+            mech_mode = st.selectbox(
+                "机制电量模式", ["小时数", "比例(%)"],
+                index=0 if st.session_state.monthly_params[config_month]["mechanism_mode"] == "小时数" else 1,
+                key=f"mech_mode_{config_month}"
+            )
+        with col_cfg2:
+            mech_max = 100.0 if mech_mode == "比例(%)" else 1000000.0
+            mech_value = st.number_input(
+                "机制电量数值", min_value=0.0, max_value=mech_max,
+                value=st.session_state.monthly_params[config_month]["mechanism_value"],
+                step=0.1, key=f"mech_value_{config_month}"
+            )
+        
+        col_cfg3, col_cfg4 = st.columns([2, 1])
+        with col_cfg3:
+            gua_mode = st.selectbox(
+                "保障性电量模式", ["小时数", "比例(%)"],
+                index=0 if st.session_state.monthly_params[config_month]["guaranteed_mode"] == "小时数" else 1,
+                key=f"gua_mode_{config_month}"
+            )
+        with col_cfg4:
+            gua_max = 100.0 if gua_mode == "比例(%)" else 1000000.0
+            gua_value = st.number_input(
+                "保障性电量数值", min_value=0.0, max_value=gua_max,
+                value=st.session_state.monthly_params[config_month]["guaranteed_value"],
+                step=0.1, key=f"gua_value_{config_month}"
+            )
+        
+        limit_rate = st.number_input(
+            "限电率(%)", min_value=0.0, max_value=100.0,
+            value=st.session_state.monthly_params[config_month]["power_limit_rate"],
+            step=0.1, key=f"limit_rate_{config_month}"
+        )
+        
+        # 保存分月电量参数
+        st.session_state.monthly_params[config_month] = {
+            "mechanism_mode": mech_mode,
+            "mechanism_value": mech_value,
+            "guaranteed_mode": gua_mode,
+            "guaranteed_value": gua_value,
+            "power_limit_rate": limit_rate
+        }
+        
+        # 2. 分月光伏配置（仅光伏电厂显示）
+        if plant_type == "光伏":
+            st.write(f"### {config_month}月 - 光伏套利曲线配置")
+            col_pv1, col_pv2 = st.columns(2)
+            with col_pv1:
+                core_start = st.number_input(
+                    "核心起始（点）", min_value=1, max_value=24,
+                    value=st.session_state.monthly_pv_params[config_month]["core_start"],
+                    key=f"core_start_{config_month}"
+                )
+                edge_start = st.number_input(
+                    "边缘起始（点）", min_value=1, max_value=24,
+                    value=st.session_state.monthly_pv_params[config_month]["edge_start"],
+                    key=f"edge_start_{config_month}"
+                )
+            with col_pv2:
+                core_end = st.number_input(
+                    "核心结束（点）", min_value=1, max_value=24,
+                    value=st.session_state.monthly_pv_params[config_month]["core_end"],
+                    key=f"core_end_{config_month}"
+                )
+                edge_end = st.number_input(
+                    "边缘结束（点）", min_value=1, max_value=24,
+                    value=st.session_state.monthly_pv_params[config_month]["edge_end"],
+                    key=f"edge_end_{config_month}"
+                )
+            
+            # 验证并保存分月光伏配置
+            if core_start > core_end:
+                st.warning(f"⚠️ {config_month}月核心起始不能大于核心结束，已自动交换")
+                core_start, core_end = core_end, core_start
+            if edge_start > edge_end:
+                st.warning(f"⚠️ {config_month}月边缘起始不能大于边缘结束，已自动交换")
+                edge_start, edge_end = edge_end, edge_start
+            
+            st.session_state.monthly_pv_params[config_month] = {
+                "core_start": core_start,
+                "core_end": core_end,
+                "edge_start": edge_start,
+                "edge_end": edge_end
+            }
+            
+            # 预览当前月份光伏时段划分
+            pv_hours = get_pv_arbitrage_hours(config_month)
+            st.info(f"""
+            时段划分预览：
+            - 核心时段（{len(pv_hours['core'])}小时）：{pv_hours['core']}
+            - 边缘时段（{len(pv_hours['edge'])}小时）：{pv_hours['edge']}
+            - 无效时段（{len(pv_hours['invalid'])}小时）：{pv_hours['invalid']}
+            """)
+    except Exception as e:
+        st.error(f"分月配置加载失败：{str(e)}")
