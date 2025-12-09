@@ -912,7 +912,7 @@ with col_import3:
         st.info(f"📌 最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
     else:
         st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
-        
+
 # 二、数据操作按钮
 st.divider()
 st.header("🔧 数据操作")
@@ -1689,23 +1689,59 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
                     "收益差值（方案二-方案一）": round(monthly_profit2 - monthly_profit1, 2)
                 })
             
-            # 1. 显示月度收益明细表格
-            st.subheader("📋 月度收益明细")
+            # 1. 显示月度收益明细表格（新增「更优方案」+ 年度汇总行）
+            st.subheader("📋 分月收益对比（含月度更优方案）")
+            # 计算每个月的「更优方案」
+            for item in monthly_profit_list:
+                p1 = item["方案一收益（元）"]
+                p2 = item["方案二收益（元）"]
+                if p1 > p2:
+                    item["更优方案"] = "方案一"
+                elif p2 > p1:
+                    item["更优方案"] = "方案二"
+                else:
+                    item["更优方案"] = "持平"
+
+            # 生成月度数据DataFrame
             profit_detail_df = pd.DataFrame(monthly_profit_list)
+            # 追加「年度汇总行」
+            annual_summary = {
+                "月份": "年度汇总",
+                "方案一收益（元）": annual_profit_plan1,
+                "方案二收益（元）": annual_profit_plan2,
+                "收益差值（方案二-方案一）": round(annual_profit_plan2 - annual_profit_plan1, 2),
+                "更优方案": "方案一" if annual_profit_plan1 > annual_profit_plan2 else "方案二" if annual_profit_plan2 > annual_profit_plan1 else "持平"
+            }
+            profit_detail_df = pd.concat([profit_detail_df, pd.DataFrame([annual_summary])], ignore_index=True)
+
+            # 显示表格（新增样式：更优方案标色）
             st.dataframe(
                 profit_detail_df,
                 use_container_width=True,
                 column_config={
                     "月份": st.column_config.TextColumn("月份", width="small"),
-                    "方案一收益（元）": st.column_config.NumberColumn("方案一收益（元）", format="%.2f"),
-                    "方案二收益（元）": st.column_config.NumberColumn("方案二收益（元）", format="%.2f"),
+                    "方案一收益（元）": st.column_config.NumberColumn("方案一收益（元）", format="¥%.2f"),
+                    "方案二收益（元）": st.column_config.NumberColumn("方案二收益（元）", format="¥%.2f"),
                     "收益差值（方案二-方案一）": st.column_config.NumberColumn(
                         "收益差值（方案二-方案一）",
-                        format="%.2f",
-                        help="正值表示方案二更优，负值表示方案一更优"
+                        format="¥%.2f",
+                        help="正值=方案二更优，负值=方案一更优"
+                    ),
+                    "更优方案": st.column_config.TextColumn(
+                        "更优方案",
+                        # 给更优方案加颜色标识
+                        cell_type=st.column_config.TextColumn.CellType.MARKDOWN,
+                        help="当月收益更高的方案"
                     )
                 }
             )
+
+            # 给「更优方案」列加颜色（用Markdown语法）
+            profit_detail_df["更优方案"] = profit_detail_df["更优方案"].apply(
+                lambda x: f"**<span style='color: #22c55e'>{x}</span>**" if x == "方案一" 
+                else f"**<span style='color: #ef4444'>{x}</span>**" if x == "方案二" 
+                else f"**<span style='color: #64748b'>{x}</span>**"
+                )
             
             # 2. 显示年度收益汇总
             st.subheader("📊 年度收益汇总")
