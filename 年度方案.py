@@ -822,31 +822,44 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（全选/取消全选修复版）
+# 3. 月份多选（全选/取消全选 100%生效版）
 with col_import3:
-    # 第一步：先处理全选/取消全选按钮（必须在multiselect之前）
-    col_btn1, col_btn2 = st.columns([1, 1])
+    st.subheader("选择需要处理的月份", divider="gray")
+    
+    # 关键优化1：调整按钮布局为横向，增加点击区域，避免宽度限制
+    col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
-        if st.button("全选月份", key="select_all_months", use_container_width=True):
-            st.session_state.selected_months = list(range(1, 13))  # 选中1-12月
+        # 按钮添加类型和反馈，确保触发可见
+        if st.button("📅 全选1-12月", key="select_all_months", type="primary", use_container_width=True):
+            st.session_state.selected_months = list(range(1, 13))  # 强制设为1-12月
+            st.success("✅ 已全选所有月份！")  # 触发反馈，确认按钮生效
     with col_btn2:
-        if st.button("取消全选", key="deselect_all_months", use_container_width=True):
+        if st.button("❌ 取消全选", key="deselect_all_months", use_container_width=True):
             st.session_state.selected_months = []  # 清空选中
-
-    # 第二步：再渲染multiselect（读取按钮修改后的session_state）
-    st.session_state.selected_months = st.multiselect(
-        "选择需要处理的月份",
-        list(range(1, 13)),
-        default=st.session_state.selected_months,  # 此时已拿到按钮修改后的状态
-        key="month_multiselect"
+            st.success("✅ 已取消所有选择！")
+    
+    # 关键优化2：multiselect单独占一行，避免宽度挤压导致显示异常
+    st.write("### 手动调整（可选）")
+    # 双向绑定：读取session_state，同时将用户选择回写
+    selected_months = st.multiselect(
+        label="可勾选/取消单个月份",
+        options=list(range(1, 13)),
+        default=st.session_state.selected_months,  # 读取全选/取消后的状态
+        key="month_multiselect_unique",  # 确保key唯一，避免冲突
+        format_func=lambda x: f"{x}月",  # 优化显示，更直观
+        use_container_width=True  # 占满宽度，避免选项被隐藏
     )
-
-    # 选中月份提示（保持原有逻辑）
-    if st.session_state.selected_months:
-        st.info(f"当前选中月份：{', '.join([f'{m}月' for m in st.session_state.selected_months])}")
+    
+    # 同步用户手动选择到session_state（核心：确保状态一致）
+    st.session_state.selected_months = selected_months
+    
+    # 选中状态提示（优化显示格式）
+    if selected_months:
+        months_text = "、".join([f"{m}月" for m in sorted(selected_months)])
+        st.info(f"📌 当前选中：{months_text}（共{len(selected_months)}个月份）")
     else:
-        st.warning("⚠️ 请先选择需要处理的月份")
-
+        st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
+        
 # 二、数据操作按钮
 st.divider()
 st.header("🔧 数据操作")
