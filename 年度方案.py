@@ -41,6 +41,8 @@ if "initialized" not in st.session_state:
     st.session_state.installed_capacity = 0.0
     st.session_state.current_region = "总部"
     st.session_state.current_province = "北京"
+    st.session_state.batch_mech_price = 0.0  # 批量-机制电价
+    st.session_state.batch_gua_price = 0.0   # 批量-保障性电价
     
     # 光伏套利时段默认配置（首次运行不报错）
     st.session_state["pv_core_start_key"] = 11
@@ -69,7 +71,9 @@ if "initialized" not in st.session_state:
             "mechanism_value": 0.0,        # 机制电量数值
             "guaranteed_mode": "小时数",   # 保障性电量输入模式
             "guaranteed_value": 0.0,       # 保障性电量数值
-            "power_limit_rate": 0.0        # 限电率(%)
+            "power_limit_rate": 0.0,       # 限电率(%)
+            "mechanism_price": 0.0,        # 新增：机制电价(元/MWh)
+            "guaranteed_price": 0.0        # 新增：保障性电价(元/MWh)
         } for month in range(1, 13)
     }
     
@@ -691,13 +695,36 @@ with col_gua2:
         key="batch_gua_val_inp"
     )
 
+# -------------------------- 新增：机制电价输入（直接插入这里）--------------------------
+col_mech_price1, col_mech_price2 = st.columns([2, 1])
+with col_mech_price1:
+    st.write("机制电价（元/MWh）")
+with col_mech_price2:
+    st.session_state.batch_mech_price = st.number_input(
+        "机制电价数值", min_value=0.0,
+        value=st.session_state.batch_mech_price, step=0.1,
+        key="batch_mech_price_inp"
+    )
+
+# -------------------------- 新增：保障性电价输入（直接插入这里）--------------------------
+col_gua_price1, col_gua_price2 = st.columns([2, 1])
+with col_gua_price1:
+    st.write("保障性电价（元/MWh）")
+with col_gua_price2:
+    st.session_state.batch_gua_price = st.number_input(
+        "保障性电价数值", min_value=0.0,
+        value=st.session_state.batch_gua_price, step=0.1,
+        key="batch_gua_price_inp"
+    )
+
+# 原有的限电率输入（保持不变）
 st.session_state.batch_limit_rate = st.number_input(
     "限电率(%)", min_value=0.0, max_value=100.0,
     value=st.session_state.batch_limit_rate, step=0.1,
     key="batch_limit_rate_inp"
 )
 
-# 批量应用按钮
+# 批量应用按钮（同步新增的电价参数，修改这里的字典）
 if st.button("📌 一键应用到所有月份", type="primary", key="batch_apply_btn"):
     for month in range(1, 13):
         st.session_state.monthly_params[month] = {
@@ -705,77 +732,95 @@ if st.button("📌 一键应用到所有月份", type="primary", key="batch_appl
             "mechanism_value": st.session_state.batch_mech_value,
             "guaranteed_mode": st.session_state.batch_gua_mode,
             "guaranteed_value": st.session_state.batch_gua_value,
-            "power_limit_rate": st.session_state.batch_limit_rate
+            "power_limit_rate": st.session_state.batch_limit_rate,
+            "mechanism_price": st.session_state.batch_mech_price,  # 新增：同步机制电价
+            "guaranteed_price": st.session_state.batch_gua_price    # 新增：同步保障性电价
         }
-    st.success("✅ 已将当前参数同步到所有月份！")
+    st.success("✅ 已将当前参数（含电价）同步到所有月份！")
 
 # 2. 分月参数调整（单独修改）- 点击保存才更新，不实时同步
 with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
-    # 选择要修改的月份
+    # 选择要修改的月份（保持不变）
     selected_month = st.selectbox("选择要修改的月份", range(1, 13), key="month_param_sel")
-    current_params = st.session_state.monthly_params[selected_month]  # 仅加载当前参数，不实时绑定
+    current_params = st.session_state.monthly_params[selected_month]  # 仅加载当前参数
     
-    # 分月-机制电量（输入框值仅临时存储，不实时同步session_state）
+    # 分月-机制电量（保持不变）
     st.write(f"##### {selected_month}月 · 机制电量")
     col_m1, col_m2 = st.columns([2, 1])
     with col_m1:
         mech_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["mechanism_mode"] == "小时数" else 1,
-            key=f"mech_mode_{selected_month}"  # 唯一key
+            key=f"mech_mode_{selected_month}"
         )
     with col_m2:
         m_max = 100.0 if mech_mode == "比例(%)" else 1000000.0
         mech_val = st.number_input(
             "数值", min_value=0.0, max_value=m_max,
             value=current_params["mechanism_value"], step=0.1,
-            key=f"mech_val_{selected_month}"  # 唯一key
+            key=f"mech_val_{selected_month}"
         )
 
-    # 分月-保障性电量（同上，仅临时存储输入值）
+    # 分月-保障性电量（保持不变）
     st.write(f"##### {selected_month}月 · 保障性电量")
     col_g1, col_g2 = st.columns([2, 1])
     with col_g1:
         gua_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["guaranteed_mode"] == "小时数" else 1,
-            key=f"gua_mode_{selected_month}"  # 唯一key
+            key=f"gua_mode_{selected_month}"
         )
     with col_g2:
         g_max = 100.0 if gua_mode == "比例(%)" else 1000000.0
         gua_val = st.number_input(
             "数值", min_value=0.0, max_value=g_max,
             value=current_params["guaranteed_value"], step=0.1,
-            key=f"gua_val_{selected_month}"  # 唯一key
+            key=f"gua_val_{selected_month}"
         )
 
-    # 分月-限电率（同上）
+    # -------------------------- 新增：分月-机制电价（插入这里）--------------------------
+    st.write(f"##### {selected_month}月 · 机制电价")
+    mech_price = st.number_input(
+        "机制电价（元/MWh）", min_value=0.0,
+        value=current_params["mechanism_price"], step=0.1,
+        key=f"mech_price_{selected_month}"
+    )
+
+    # -------------------------- 新增：分月-保障性电价（插入这里）--------------------------
+    st.write(f"##### {selected_month}月 · 保障性电价")
+    gua_price = st.number_input(
+        "保障性电价（元/MWh）", min_value=0.0,
+        value=current_params["guaranteed_price"], step=0.1,
+        key=f"gua_price_{selected_month}"
+    )
+
+    # 分月-限电率（保持不变）
     st.write(f"##### {selected_month}月 · 限电率")
     limit_rate = st.number_input(
         "限电率(%)", min_value=0.0, max_value=100.0,
         value=current_params["power_limit_rate"], step=0.1,
-        key=f"limit_rate_{selected_month}"  # 唯一key
+        key=f"limit_rate_{selected_month}"
     )
 
-    # 保存按钮：仅点击时才更新session_state（核心修改）
+    # 保存按钮（修改这里，新增电价参数）
     col_save, col_empty = st.columns([1, 5])
     with col_save:
         if st.button(f"💾 保存{selected_month}月参数", key=f"save_{selected_month}_param", type="primary"):
-            # 仅在点击保存时，将输入框的值写入session_state
             st.session_state.monthly_params[selected_month] = {
                 "mechanism_mode": mech_mode,
                 "mechanism_value": mech_val,
                 "guaranteed_mode": gua_mode,
                 "guaranteed_value": gua_val,
-                "power_limit_rate": limit_rate
+                "power_limit_rate": limit_rate,
+                "mechanism_price": mech_price,  # 新增：保存机制电价
+                "guaranteed_price": gua_price    # 新增：保存保障性电价
             }
-            st.success(f"✅ 已保存{selected_month}月的参数！参数预览表格已更新")
-            # 可选：保存后自动收起展开面板（优化体验）
-            st.rerun()  # 刷新页面，让参数预览表格同步最新数据
+            st.success(f"✅ 已保存{selected_month}月的参数（含电价）！")
+            st.rerun()
 
-    # 3. 所有月份参数预览表格（实时读取session_state，保存后自动更新）
+    # 所有月份参数预览表格（新增电价列，保持不变）
     st.divider()
-    st.write("#### 所有月份参数预览（保存后自动刷新）")
+    st.write("#### 所有月份参数预览（含电价）")
     param_preview = []
     for month in range(1, 13):
         p = st.session_state.monthly_params[month]
@@ -783,6 +828,8 @@ with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
             "月份": f"{month}月",
             "机制电量": f"{p['mechanism_mode']} · {p['mechanism_value']:.2f}",
             "保障性电量": f"{p['guaranteed_mode']} · {p['guaranteed_value']:.2f}",
+            "机制电价(元/MWh)": f"{p['mechanism_price']:.2f}",  # 新增列
+            "保障性电价(元/MWh)": f"{p['guaranteed_price']:.2f}",  # 新增列
             "限电率": f"{p['power_limit_rate']:.2f}%"
         })
     preview_df = pd.DataFrame(param_preview)
