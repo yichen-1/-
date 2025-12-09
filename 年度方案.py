@@ -822,39 +822,41 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（彻底解决生成方案提示问题）
+# 3. 月份多选（全选后自动显示12个月+支持取消个别）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
-    # 全选/取消全选按钮（强制设置session_state并刷新）
+    # 全选/取消全选按钮（强制同步状态）
     col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
         if st.button("📅 全选1-12月", key="select_all_months_final", type="primary", use_container_width=True):
-            st.session_state.selected_months = list(range(1, 13))  # 强制赋值1-12月
+            st.session_state.selected_months = list(range(1, 13))
             st.success("✅ 已全选所有月份！")
-            st.rerun()  # 刷新后直接保留该状态
+            st.rerun()
     with col_btn2:
         if st.button("❌ 取消全选", key="deselect_all_months_final", use_container_width=True):
             st.session_state.selected_months = []
             st.success("✅ 已取消所有选择！")
             st.rerun()
     
-    # multiselect：仅用于“手动微调”，不主动回写session_state（避免覆盖全选状态）
-    st.write("### 手动微调（可选）")
+    # 手动微调区域：默认显示已选的12个月，支持取消个别
+    st.write("### 手动微调（可取消个别月份）")
     manual_selected = st.multiselect(
-        label="勾选/取消单个月份",
-        options=list(range(1, 13)),
-        default=st.session_state.selected_months,  # 直接显示全选后的状态
+        label="当前已选月份（点击下拉框可取消）",
+        options=list(range(1, 13)),  # 所有月份选项
+        default=st.session_state.selected_months,  # 全选后自动填入1-12月
         key="month_multiselect_manual",
-        format_func=lambda x: f"{x}月"
+        format_func=lambda x: f"{x}月",  # 显示为“1月”“2月”
+        use_container_width=True,  # 占满宽度，显示更多已选选项
+        placeholder="请选择月份（全选后自动填充）"
     )
     
-    # 仅当用户“主动手动修改”时，才更新session_state（避免自动覆盖）
+    # 双向同步：手动取消个别月份后，更新session_state
     if manual_selected != st.session_state.selected_months:
         st.session_state.selected_months = manual_selected
-        st.rerun()
+        st.rerun()  # 刷新后显示最新选中状态
     
-    # 强制显示当前session_state的真实值（验证状态）
+    # 状态提示（明确显示已选月份）
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
         st.info(f"📌 当前选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
