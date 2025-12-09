@@ -874,42 +874,45 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份选择（修复关联逻辑：全选/取消全选与手动微调严格同步）
+# 3. 月份选择（终极修复：强制同步，全选后下拉框自动填充12月）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
-    # 全选/取消全选按钮（点击后强制更新状态+刷新页面）
+    # 全选/取消全选按钮（点击后直接更新状态+强制刷新）
     col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
-        if st.button("📅 全选1-12月", key="select_all_months_fix", type="primary", use_container_width=True):
-            st.session_state.selected_months = list(range(1, 13))  # 强制设为1-12月
-            st.rerun()  # 刷新页面，让multiselect同步最新状态
+        if st.button("📅 全选1-12月", key="select_all_final", type="primary", use_container_width=True):
+            st.session_state.selected_months = list(range(1, 13))
+            st.rerun()  # 强制刷新页面，让下拉框重新渲染
     with col_btn2:
-        if st.button("❌ 取消全选", key="deselect_all_months_fix", use_container_width=True):
-            st.session_state.selected_months = []  # 强制清空
-            st.rerun()  # 刷新页面，让multiselect同步最新状态
+        if st.button("❌ 取消全选", key="deselect_all_final", use_container_width=True):
+            st.session_state.selected_months = []
+            st.rerun()  # 强制刷新页面
     
-    # 手动微调区域（严格绑定session_state，无额外逻辑）
+    # 手动微调区域（强制绑定session_state，无延迟）
     st.write("### 手动微调（可取消个别月份）")
+    # 直接将multiselect的选项和默认值设为session_state的最新值
     manual_selected = st.multiselect(
         label=f"当前已选：{len(st.session_state.selected_months)}个月份",
         options=list(range(1, 13)),  # 固定选项：1-12月
-        default=st.session_state.selected_months,  # 强制取session_state的最新值
-        key="month_multiselect_fix",  # 唯一Key避免缓存
+        default=st.session_state.selected_months,  # 强制取当前选中的月份
+        key=f"month_multiselect_{len(st.session_state.selected_months)}",  # 用选中数量做Key，强制重新渲染
         format_func=lambda x: f"{x}月",
-        placeholder="请选择月份（全选后自动填充）"
+        placeholder="全选后自动填充12个月"  # 仅在未选时显示提示
     )
     
-    # 仅在手动调整后同步状态（不触发额外rerun，依赖multiselect自身渲染）
+    # 同步状态（手动调整后更新session_state）
     if manual_selected != st.session_state.selected_months:
         st.session_state.selected_months = manual_selected
+        st.rerun()  # 调整后也刷新，确保显示一致
     
-    # 状态提示（严格反映session_state的内容）
+    # 状态提示（严格反映最终选中）
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
         st.info(f"📌 最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
     else:
         st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
+        
 # 二、数据操作按钮
 st.divider()
 st.header("🔧 数据操作")
