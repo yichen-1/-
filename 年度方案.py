@@ -1025,59 +1025,59 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
         )
         
         try:
-        # 获取基础数据中的价格信息（关键：从monthly_data中提取价格）
-        base_df = st.session_state.monthly_data.get(view_month, None)
-        if base_df is None or base_df.empty:
-            st.info("⚠️ 缺少基础价格数据，仅展示交易量图表")
-            chart_data = typical_df[["时段", "方案一月度电量(MWh)"]].set_index("时段")
-            st.bar_chart(chart_data, use_container_width=True)
-        else:
-            # 准备数据
-            hours = typical_df["时段"].values
-            trade_volume = typical_df["方案一月度电量(MWh)"].values
-            spot_price = base_df["现货价格(元/MWh)"].values
-            mid_long_price = base_df["中长期价格(元/MWh)"].values
+            # 获取基础数据中的价格信息（关键：从monthly_data中提取价格）
+            base_df = st.session_state.monthly_data.get(view_month, None)
+            if base_df is None or base_df.empty:
+                st.info("⚠️ 缺少基础价格数据，仅展示交易量图表")
+                chart_data = typical_df[["时段", "方案一月度电量(MWh)"]].set_index("时段")
+                st.bar_chart(chart_data, use_container_width=True)
+            else:
+                # 准备数据
+                hours = typical_df["时段"].values
+                trade_volume = typical_df["方案一月度电量(MWh)"].values
+                spot_price = base_df["现货价格(元/MWh)"].values
+                mid_long_price = base_df["中长期价格(元/MWh)"].values
             
-            # 设置中文字体（避免中文乱码）
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
-            plt.rcParams['axes.unicode_minus'] = False
-            
-            # 创建图表和双坐标轴
-            fig, ax1 = plt.subplots(figsize=(12, 6))
-            
-            # 主坐标轴：交易量柱状图
-            color1 = '#2E86AB'  # 蓝色
-            ax1.set_xlabel('时段（点）', fontsize=12)
-            ax1.set_ylabel('交易量（MWh）', color=color1, fontsize=12)
-            ax1.bar(hours, trade_volume, color=color1, alpha=0.7, label='方案一交易量')
-            ax1.tick_params(axis='y', labelcolor=color1)
-            ax1.set_xticks(hours)  # 确保x轴显示所有时段
-            ax1.grid(axis='y', alpha=0.3)
-            
-            # 次坐标轴：价格折线图
-            ax2 = ax1.twinx()
-            color2 = '#A23B72'  # 紫红色（现货价格）
-            color3 = '#F18F01'  # 橙色（中长期价格）
-            ax2.set_ylabel('价格（元/MWh）', fontsize=12)
-            ax2.plot(hours, spot_price, color=color2, marker='o', linewidth=2, label='现货价格')
-            ax2.plot(hours, mid_long_price, color=color3, marker='s', linewidth=2, label='中长期价格')
-            ax2.tick_params(axis='y')
-            
-            # 合并图例
-            lines1, labels1 = ax1.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
-            
-            # 标题和布局调整
-            plt.title(f'{view_month}月 方案一交易量与价格对比', fontsize=14, pad=20)
-            plt.tight_layout()
-            
-            # 在streamlit中显示图表
-            st.pyplot(fig)
+                # 设置中文字体（避免中文乱码）
+                plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
+                plt.rcParams['axes.unicode_minus'] = False
+                
+                # 创建图表和双坐标轴
+                fig, ax1 = plt.subplots(figsize=(12, 6))
+                
+                # 主坐标轴：交易量柱状图
+                color1 = '#2E86AB'  # 蓝色
+                ax1.set_xlabel('时段（点）', fontsize=12)
+                ax1.set_ylabel('交易量（MWh）', color=color1, fontsize=12)
+                ax1.bar(hours, trade_volume, color=color1, alpha=0.7, label='方案一交易量')
+                ax1.tick_params(axis='y', labelcolor=color1)
+                ax1.set_xticks(hours)  # 确保x轴显示所有时段
+                ax1.grid(axis='y', alpha=0.3)
+                
+                # 次坐标轴：价格折线图
+                ax2 = ax1.twinx()
+                color2 = '#A23B72'  # 紫红色（现货价格）
+                color3 = '#F18F01'  # 橙色（中长期价格）
+                ax2.set_ylabel('价格（元/MWh）', fontsize=12)
+                ax2.plot(hours, spot_price, color=color2, marker='o', linewidth=2, label='现货价格')
+                ax2.plot(hours, mid_long_price, color=color3, marker='s', linewidth=2, label='中长期价格')
+                ax2.tick_params(axis='y')
+                
+                # 合并图例
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
+                
+                # 标题和布局调整
+                plt.title(f'{view_month}月 方案一交易量与价格对比', fontsize=14, pad=20)
+                plt.tight_layout()
+                
+                # 在streamlit中显示图表
+                st.pyplot(fig)
             
         except Exception as e:
-        st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
-        
+            st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
+            
         # 方案二展示
         st.write(f"### 方案二：{scheme2_note}（{view_month}月）")
         arbitrage_df = st.session_state.trade_power_arbitrage[view_month][["时段", "平均发电量(MWh)", "时段比重(%)", "方案二月度电量(MWh)"]].copy()
@@ -1105,68 +1105,68 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
             """)
         
         try:
-    # 获取基础数据中的价格信息
-    base_df = st.session_state.monthly_data.get(view_month, None)
-    if base_df is None or base_df.empty:
-        st.info("⚠️ 缺少基础价格数据，仅展示交易量图表")
-        chart_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].set_index("时段")
-        st.bar_chart(chart_data, use_container_width=True)
-    else:
-        # 准备数据（确保数据长度一致）
-        hours = arbitrage_df["时段"].values
-        trade_volume = arbitrage_df["方案二月度电量(MWh)"].values
-        # 确保价格数据和时段数一致
-        if len(base_df) >= 24:
-            spot_price = base_df["现货价格(元/MWh)"].head(24).values
-            mid_long_price = base_df["中长期价格(元/MWh)"].head(24).values
-        else:
-            spot_price = np.zeros(24)
-            mid_long_price = np.zeros(24)
+            # 获取基础数据中的价格信息
+            base_df = st.session_state.monthly_data.get(view_month, None)
+            if base_df is None or base_df.empty:
+                st.info("⚠️ 缺少基础价格数据，仅展示交易量图表")
+                chart_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].set_index("时段")
+                st.bar_chart(chart_data, use_container_width=True)
+            else:
+                # 准备数据（确保数据长度一致）
+                hours = arbitrage_df["时段"].values
+                trade_volume = arbitrage_df["方案二月度电量(MWh)"].values
+                # 确保价格数据和时段数一致
+                if len(base_df) >= 24:
+                    spot_price = base_df["现货价格(元/MWh)"].head(24).values
+                    mid_long_price = base_df["中长期价格(元/MWh)"].head(24).values
+                else:
+                    spot_price = np.zeros(24)
+                    mid_long_price = np.zeros(24)
         
-        # 设置中文字体（兼容不同环境）
-        try:
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
-            plt.rcParams['axes.unicode_minus'] = False
-        except:
-            pass
+                # 设置中文字体（兼容不同环境）
+                try:
+                    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
+                    plt.rcParams['axes.unicode_minus'] = False
+                except:
+                    pass
+                
+                # 创建图表和双坐标轴
+                fig, ax1 = plt.subplots(figsize=(14, 6))
         
-        # 创建图表和双坐标轴
-        fig, ax1 = plt.subplots(figsize=(14, 6))
+                # 主坐标轴：交易量柱状图
+                color1 = '#E94B3C'  # 红色
+                ax1.set_xlabel('时段（点）', fontsize=11)
+                ax1.set_ylabel('交易量（MWh）', color=color1, fontsize=11)
+                bars = ax1.bar(hours, trade_volume, color=color1, alpha=0.7, label='方案二交易量')
+                ax1.tick_params(axis='y', labelcolor=color1)
+                ax1.set_xticks(hours)
+                ax1.set_xlim(0.5, 24.5)
+                ax1.grid(axis='y', alpha=0.3)
+                
+                # 次坐标轴：价格折线图
+                ax2 = ax1.twinx()
+                color2 = '#A23B72'  # 紫红色（现货价格）
+                color3 = '#F18F01'  # 橙色（中长期价格）
+                ax2.set_ylabel('价格（元/MWh）', fontsize=11)
+                line1 = ax2.plot(hours, spot_price, color=color2, marker='o', markersize=4, linewidth=2, label='现货价格')
+                line2 = ax2.plot(hours, mid_long_price, color=color3, marker='s', markersize=4, linewidth=2, label='中长期价格')
+                ax2.tick_params(axis='y')
+                
+                # 合并图例
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=9, framealpha=0.9)
+                
+                # 标题和布局调整
+                plt.title(f'{view_month}月 方案二交易量与价格对比', fontsize=13, pad=15)
+                plt.tight_layout()
+                
+                # 显示图表并释放内存
+                st.pyplot(fig)
+                plt.close(fig)
         
-        # 主坐标轴：交易量柱状图
-        color1 = '#E94B3C'  # 红色
-        ax1.set_xlabel('时段（点）', fontsize=11)
-        ax1.set_ylabel('交易量（MWh）', color=color1, fontsize=11)
-        bars = ax1.bar(hours, trade_volume, color=color1, alpha=0.7, label='方案二交易量')
-        ax1.tick_params(axis='y', labelcolor=color1)
-        ax1.set_xticks(hours)
-        ax1.set_xlim(0.5, 24.5)
-        ax1.grid(axis='y', alpha=0.3)
-        
-        # 次坐标轴：价格折线图
-        ax2 = ax1.twinx()
-        color2 = '#A23B72'  # 紫红色（现货价格）
-        color3 = '#F18F01'  # 橙色（中长期价格）
-        ax2.set_ylabel('价格（元/MWh）', fontsize=11)
-        line1 = ax2.plot(hours, spot_price, color=color2, marker='o', markersize=4, linewidth=2, label='现货价格')
-        line2 = ax2.plot(hours, mid_long_price, color=color3, marker='s', markersize=4, linewidth=2, label='中长期价格')
-        ax2.tick_params(axis='y')
-        
-        # 合并图例
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=9, framealpha=0.9)
-        
-        # 标题和布局调整
-        plt.title(f'{view_month}月 方案二交易量与价格对比', fontsize=13, pad=15)
-        plt.tight_layout()
-        
-        # 显示图表并释放内存
-        st.pyplot(fig)
-        plt.close(fig)
-        
-    except Exception as e:
-    st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
+        except Exception as e:
+            st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
         
         # 3. 双方案日分解展示（四列数据）
         st.subheader(f"3. {view_month}月双方案日分解电量（四列数据）")
