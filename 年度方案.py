@@ -6,6 +6,9 @@ from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 import matplotlib.pyplot as plt  # 新增：导入matplotlib
+# 初始化月份选择状态（必须放在最前面！）
+if "selected_months" not in st.session_state:
+    st.session_state.selected_months = []  # 初始为空，避免状态缺失
 
 # -------------------------- 必备：区域-省份映射字典（合并去重，保留详细版本） --------------------------
 REGIONS = {
@@ -20,7 +23,7 @@ REGIONS = {
     "内蒙古电网": ["蒙西"]
 }
 
-# -------------------------- 全局配置 & Session State 初始化（完善缺失默认值+补全参数） --------------------------
+# -------------------------- 全局配置 & Session State 初始化（完善缺失默认值） --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
@@ -28,18 +31,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化月份选择状态（保留，放在set_page_config之后即可）
-if "selected_months" not in st.session_state:
-    st.session_state.selected_months = []  # 初始为空，避免状态缺失
-
 if "initialized" not in st.session_state:
-    # 基础信息默认值（清理重复赋值）
+    # 基础信息默认值
     st.session_state.current_year = 2025
     st.session_state.current_region = "总部"
-    st.session_state.current_province = REGIONS["总部"][0]  # 联动区域默认省份（无需重复赋值）
+    st.session_state.current_province = REGIONS["总部"][0]  # 联动区域默认省份
     st.session_state.current_power_plant = "示例电厂"
     st.session_state.current_plant_type = "风电"
     st.session_state.installed_capacity = 0.0
+    st.session_state.current_region = "总部"
+    st.session_state.current_province = "北京"
+    st.session_state.batch_mech_price = 0.0  # 批量-机制电价
+    st.session_state.batch_gua_price = 0.0   # 批量-保障性电价
     
     # 光伏套利时段默认配置（首次运行不报错）
     st.session_state["pv_core_start_key"] = 11
@@ -53,6 +56,7 @@ if "initialized" not in st.session_state:
     
     # 数据存储容器
     st.session_state.monthly_data = {}  # 分月基础数据
+    st.session_state.selected_months = []  # 选中的月份
     st.session_state.trade_power_typical = {}  # 方案一结果
     st.session_state.trade_power_arbitrage = {}  # 方案二结果
     st.session_state.market_hours = {}  # 分月市场化小时数
@@ -60,16 +64,7 @@ if "initialized" not in st.session_state:
     st.session_state.total_annual_trade = 0.0  # 年度总电量
     st.session_state.calculated = False  # 是否已生成方案
     
-    # 批量应用的默认参数（含新增电价，统一放在前面，逻辑更清晰）
-    st.session_state.batch_mech_mode = "小时数"
-    st.session_state.batch_mech_value = 0.0
-    st.session_state.batch_gua_mode = "小时数"
-    st.session_state.batch_gua_value = 0.0
-    st.session_state.batch_mech_price = 0.0  # 批量-机制电价（新增）
-    st.session_state.batch_gua_price = 0.0   # 批量-保障性电价（新增）
-    st.session_state.batch_limit_rate = 0.0
-    
-    # 分月电量参数（每个月独立存储，含新增电价）
+    # 分月电量参数（每个月独立存储）
     st.session_state.monthly_params = {
         month: {  # 1-12月，每个月对应独立参数
             "mechanism_mode": "小时数",    # 机制电量输入模式
@@ -82,23 +77,15 @@ if "initialized" not in st.session_state:
         } for month in range(1, 13)
     }
     
+    # 批量应用的默认参数（用于批量设置时的初始值）
+    st.session_state.batch_mech_mode = "小时数"
+    st.session_state.batch_mech_value = 0.0
+    st.session_state.batch_gua_mode = "小时数"
+    st.session_state.batch_gua_value = 0.0
+    st.session_state.batch_limit_rate = 0.0
+    
     # 标记初始化完成
     st.session_state.initialized = True
-
-# -------------------------- 关键补充：参数补全（兼容旧Session State，避免AttributeError） --------------------------
-else:
-    # 补全批量电价参数（如果之前运行过旧版本，没有这两个参数时自动新增）
-    if "batch_mech_price" not in st.session_state:
-        st.session_state.batch_mech_price = 0.0
-    if "batch_gua_price" not in st.session_state:
-        st.session_state.batch_gua_price = 0.0
-    
-    # 补全分月电价参数（每个月都检查，确保不遗漏）
-    for month in range(1, 13):
-        if "mechanism_price" not in st.session_state.monthly_params[month]:
-            st.session_state.monthly_params[month]["mechanism_price"] = 0.0
-        if "guaranteed_price" not in st.session_state.monthly_params[month]:
-            st.session_state.monthly_params[month]["guaranteed_price"] = 0.0
 
 # -------------------------- 核心工具函数 --------------------------
 def get_days_in_month(year, month):
@@ -887,43 +874,46 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（修复：取消无限循环，保留全选同步）
+# 3. 月份多选（全选后显示12月+支持取消个别+无报错）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
-    # 全选/取消全选按钮（仅这里加rerun，且用if判断避免重复触发）
+    # 全选/取消全选按钮（强制同步状态）
     col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
         if st.button("📅 全选1-12月", key="select_all_months_final", type="primary", use_container_width=True):
-            st.session_state.selected_months = list(range(1, 13))  # 设为1-12月
-            st.rerun()  # 仅全选时刷新1次，让下拉框同步
+            st.session_state.selected_months = list(range(1, 13))
+            st.success("✅ 已全选所有月份！下拉框中可取消个别月份")
+            st.rerun()
     with col_btn2:
         if st.button("❌ 取消全选", key="deselect_all_months_final", use_container_width=True):
-            st.session_state.selected_months = []  # 清空选择
-            st.rerun()  # 仅取消全选时刷新1次
+            st.session_state.selected_months = []
+            st.success("✅ 已取消所有选择！")
+            st.rerun()
     
-    # 手动微调区域（核心：default绑定session_state，自动同步，去掉多余rerun）
+    # 手动微调区域：去掉不支持的use_container_width，保留核心功能
     st.write("### 手动微调（可取消个别月份）")
     manual_selected = st.multiselect(
-        label=f"当前已选：{len(st.session_state.selected_months)}个月份",
+        label="当前已选：{}个月份（点击下拉框取消个别）".format(len(st.session_state.selected_months)),
         options=list(range(1, 13)),  # 所有月份选项
-        default=st.session_state.selected_months,  # 实时绑定最新选中状态，不用rerun
+        default=st.session_state.selected_months,  # 全选后自动填入1-12月
         key="month_multiselect_manual",
-        format_func=lambda x: f"{x}月",
+        format_func=lambda x: f"{x}月",  # 显示为“1月”“2月”
         placeholder="请选择月份（全选后自动填充）"
     )
     
-    # 单向同步：手动修改后更新session_state（去掉rerun，multiselect会自动渲染）
+    # 双向同步：手动取消个别月份后，更新session_state
     if manual_selected != st.session_state.selected_months:
         st.session_state.selected_months = manual_selected
+        st.rerun()  # 刷新后显示最新选中状态
     
-    # 状态提示（简洁明了，不触发额外渲染）
+    # 状态提示（明确显示已选月份，避免用户困惑）
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
-        st.info(f"📌 最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
+        st.info(f"📌 当前最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
     else:
         st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
-        
+
 # 二、数据操作按钮
 st.divider()
 st.header("🔧 数据操作")
