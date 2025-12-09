@@ -873,9 +873,10 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度双方案（重点修复：严格过滤无效数据）
+# 生成年度双方案的代码片段（确保此处引用正确）
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
+        # 核心检查：读取st.session_state.selected_months
         if not st.session_state.selected_months or not st.session_state.monthly_data:
             st.warning("⚠️ 请先导入/初始化月份数据并选择月份")
         elif st.session_state.installed_capacity <= 0:
