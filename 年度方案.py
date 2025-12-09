@@ -709,68 +709,73 @@ if st.button("📌 一键应用到所有月份", type="primary", key="batch_appl
         }
     st.success("✅ 已将当前参数同步到所有月份！")
 
-# 2. 分月参数调整（单独修改某月份）
+# 2. 分月参数调整（单独修改）- 点击保存才更新，不实时同步
 with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
     # 选择要修改的月份
     selected_month = st.selectbox("选择要修改的月份", range(1, 13), key="month_param_sel")
-    current_params = st.session_state.monthly_params[selected_month]  # 获取该月当前参数
-
-    # 分月-机制电量
+    current_params = st.session_state.monthly_params[selected_month]  # 仅加载当前参数，不实时绑定
+    
+    # 分月-机制电量（输入框值仅临时存储，不实时同步session_state）
     st.write(f"##### {selected_month}月 · 机制电量")
     col_m1, col_m2 = st.columns([2, 1])
     with col_m1:
         mech_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["mechanism_mode"] == "小时数" else 1,
-            key=f"mech_mode_{selected_month}"
+            key=f"mech_mode_{selected_month}"  # 唯一key
         )
     with col_m2:
         m_max = 100.0 if mech_mode == "比例(%)" else 1000000.0
         mech_val = st.number_input(
             "数值", min_value=0.0, max_value=m_max,
             value=current_params["mechanism_value"], step=0.1,
-            key=f"mech_val_{selected_month}"
+            key=f"mech_val_{selected_month}"  # 唯一key
         )
 
-    # 分月-保障性电量
+    # 分月-保障性电量（同上，仅临时存储输入值）
     st.write(f"##### {selected_month}月 · 保障性电量")
     col_g1, col_g2 = st.columns([2, 1])
     with col_g1:
         gua_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["guaranteed_mode"] == "小时数" else 1,
-            key=f"gua_mode_{selected_month}"
+            key=f"gua_mode_{selected_month}"  # 唯一key
         )
     with col_g2:
         g_max = 100.0 if gua_mode == "比例(%)" else 1000000.0
         gua_val = st.number_input(
             "数值", min_value=0.0, max_value=g_max,
             value=current_params["guaranteed_value"], step=0.1,
-            key=f"gua_val_{selected_month}"
+            key=f"gua_val_{selected_month}"  # 唯一key
         )
 
-    # 分月-限电率
+    # 分月-限电率（同上）
     st.write(f"##### {selected_month}月 · 限电率")
     limit_rate = st.number_input(
         "限电率(%)", min_value=0.0, max_value=100.0,
         value=current_params["power_limit_rate"], step=0.1,
-        key=f"limit_rate_{selected_month}"
+        key=f"limit_rate_{selected_month}"  # 唯一key
     )
 
-    # 保存分月参数
-    if st.button(f"💾 保存{selected_month}月参数", key=f"save_{selected_month}_param"):
-        st.session_state.monthly_params[selected_month] = {
-            "mechanism_mode": mech_mode,
-            "mechanism_value": mech_val,
-            "guaranteed_mode": gua_mode,
-            "guaranteed_value": gua_val,
-            "power_limit_rate": limit_rate
-        }
-        st.success(f"✅ 已保存{selected_month}月的参数！")
+    # 保存按钮：仅点击时才更新session_state（核心修改）
+    col_save, col_empty = st.columns([1, 5])
+    with col_save:
+        if st.button(f"💾 保存{selected_month}月参数", key=f"save_{selected_month}_param", type="primary"):
+            # 仅在点击保存时，将输入框的值写入session_state
+            st.session_state.monthly_params[selected_month] = {
+                "mechanism_mode": mech_mode,
+                "mechanism_value": mech_val,
+                "guaranteed_mode": gua_mode,
+                "guaranteed_value": gua_val,
+                "power_limit_rate": limit_rate
+            }
+            st.success(f"✅ 已保存{selected_month}月的参数！参数预览表格已更新")
+            # 可选：保存后自动收起展开面板（优化体验）
+            st.rerun()  # 刷新页面，让参数预览表格同步最新数据
 
-    # 3. 所有月份参数预览表格
+    # 3. 所有月份参数预览表格（实时读取session_state，保存后自动更新）
     st.divider()
-    st.write("#### 所有月份参数预览")
+    st.write("#### 所有月份参数预览（保存后自动刷新）")
     param_preview = []
     for month in range(1, 13):
         p = st.session_state.monthly_params[month]
