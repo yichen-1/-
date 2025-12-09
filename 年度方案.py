@@ -822,36 +822,39 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（全选后状态同步+生成方案生效）
+# 3. 月份多选（彻底解决生成方案提示问题）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
-    # 全选/取消全选按钮（添加st.rerun()强制刷新页面）
+    # 全选/取消全选按钮（强制设置session_state并刷新）
     col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
-        if st.button("📅 全选1-12月", key="select_all_months", type="primary", use_container_width=True):
+        if st.button("📅 全选1-12月", key="select_all_months_final", type="primary", use_container_width=True):
             st.session_state.selected_months = list(range(1, 13))  # 强制赋值1-12月
             st.success("✅ 已全选所有月份！")
-            st.rerun()  # 刷新页面，让multiselect和生成方案逻辑读取新状态
+            st.rerun()  # 刷新后直接保留该状态
     with col_btn2:
-        if st.button("❌ 取消全选", key="deselect_all_months", use_container_width=True):
+        if st.button("❌ 取消全选", key="deselect_all_months_final", use_container_width=True):
             st.session_state.selected_months = []
             st.success("✅ 已取消所有选择！")
-            st.rerun()  # 刷新页面同步状态
+            st.rerun()
     
-    # multiselect（强制绑定最新session_state）
-    selected_months = st.multiselect(
-        label="可勾选/取消单个月份",
+    # multiselect：仅用于“手动微调”，不主动回写session_state（避免覆盖全选状态）
+    st.write("### 手动微调（可选）")
+    manual_selected = st.multiselect(
+        label="勾选/取消单个月份",
         options=list(range(1, 13)),
-        default=st.session_state.selected_months,  # 读取全选后的状态
-        key="month_multiselect_final",  # 确保key唯一无冲突
+        default=st.session_state.selected_months,  # 直接显示全选后的状态
+        key="month_multiselect_manual",
         format_func=lambda x: f"{x}月"
     )
     
-    # 双向同步：手动修改multiselect后也更新session_state
-    st.session_state.selected_months = selected_months
+    # 仅当用户“主动手动修改”时，才更新session_state（避免自动覆盖）
+    if manual_selected != st.session_state.selected_months:
+        st.session_state.selected_months = manual_selected
+        st.rerun()
     
-    # 选中状态提示（验证当前session_state的值）
+    # 强制显示当前session_state的真实值（验证状态）
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
         st.info(f"📌 当前选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
@@ -873,10 +876,9 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 生成年度双方案的代码片段（确保此处引用正确）
+# 2. 生成年度双方案（重点修复：严格过滤无效数据）
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
-        # 核心检查：读取st.session_state.selected_months
         if not st.session_state.selected_months or not st.session_state.monthly_data:
             st.warning("⚠️ 请先导入/初始化月份数据并选择月份")
         elif st.session_state.installed_capacity <= 0:
