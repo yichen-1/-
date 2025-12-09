@@ -1702,7 +1702,6 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
                     "收益差值（方案二-方案一）": st.column_config.NumberColumn(
                         "收益差值（方案二-方案一）",
                         format="%.2f",
-                        cell_type=st.column_config.NumberColumn.CellType.NUMBER,
                         help="正值表示方案二更优，负值表示方案一更优"
                     )
                 }
