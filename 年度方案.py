@@ -844,12 +844,12 @@ st.subheader(
 )
 st.caption(f"方案一：典型出力曲线 | 方案二：{scheme2_title}")
 
-# 一、模板导出与批量导入区域
+# -------------------------- 模板导出与批量导入（合并重复模块，只保留1次）--------------------------
 st.divider()
 st.header("📤 模板导出与批量导入")
 col_import1, col_import2, col_import3 = st.columns(3)
 
-# 1. 导出模板按钮
+# 1. 导出模板按钮（只保留1个）
 with col_import1:
     template_output = export_template()
     st.download_button(
@@ -860,12 +860,12 @@ with col_import1:
         use_container_width=True
     )
 
-# 2. 批量导入按钮
+# 2. 批量导入按钮（只保留1个）
 with col_import2:
     batch_file = st.file_uploader(
         "📥 批量导入Excel（含多月份子表）",
         type=["xlsx"],
-        key="batch_import_file"
+        key="batch_import_file_unique"  # 加unique确保key不重复
     )
     if batch_file is not None:
         monthly_data = batch_import_excel(batch_file)
@@ -874,43 +874,40 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（全选后显示12月+支持取消个别+无报错）
+# 3. 月份选择（合并重复逻辑，只保留1个）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
-    # 全选/取消全选按钮（强制同步状态）
+    # 全选/取消全选按钮
     col_btn1, col_btn2 = st.columns([1, 1], gap="small")
     with col_btn1:
-        if st.button("📅 全选1-12月", key="select_all_months_final", type="primary", use_container_width=True):
+        if st.button("📅 全选1-12月", key="select_all_months_unique", type="primary", use_container_width=True):
             st.session_state.selected_months = list(range(1, 13))
-            st.success("✅ 已全选所有月份！下拉框中可取消个别月份")
             st.rerun()
     with col_btn2:
-        if st.button("❌ 取消全选", key="deselect_all_months_final", use_container_width=True):
+        if st.button("❌ 取消全选", key="deselect_all_months_unique", use_container_width=True):
             st.session_state.selected_months = []
-            st.success("✅ 已取消所有选择！")
             st.rerun()
     
-    # 手动微调区域：去掉不支持的use_container_width，保留核心功能
+    # 手动微调区域
     st.write("### 手动微调（可取消个别月份）")
     manual_selected = st.multiselect(
-        label="当前已选：{}个月份（点击下拉框取消个别）".format(len(st.session_state.selected_months)),
-        options=list(range(1, 13)),  # 所有月份选项
-        default=st.session_state.selected_months,  # 全选后自动填入1-12月
-        key="month_multiselect_manual",
-        format_func=lambda x: f"{x}月",  # 显示为“1月”“2月”
+        label=f"当前已选：{len(st.session_state.selected_months)}个月份",
+        options=list(range(1, 13)),
+        default=st.session_state.selected_months,
+        key="month_multiselect_unique",
+        format_func=lambda x: f"{x}月",
         placeholder="请选择月份（全选后自动填充）"
     )
     
-    # 双向同步：手动取消个别月份后，更新session_state
+    # 同步状态
     if manual_selected != st.session_state.selected_months:
         st.session_state.selected_months = manual_selected
-        st.rerun()  # 刷新后显示最新选中状态
     
-    # 状态提示（明确显示已选月份，避免用户困惑）
+    # 状态提示
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
-        st.info(f"📌 当前最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
+        st.info(f"📌 最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
     else:
         st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
 
