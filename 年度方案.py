@@ -6,9 +6,6 @@ from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 import matplotlib.pyplot as plt  # 新增：导入matplotlib
-# 初始化月份选择状态（必须放在最前面！）
-if "selected_months" not in st.session_state:
-    st.session_state.selected_months = []  # 初始为空，避免状态缺失
 
 # -------------------------- 必备：区域-省份映射字典（合并去重，保留详细版本） --------------------------
 REGIONS = {
@@ -23,7 +20,7 @@ REGIONS = {
     "内蒙古电网": ["蒙西"]
 }
 
-# -------------------------- 全局配置 & Session State 初始化（完善缺失默认值） --------------------------
+# -------------------------- 全局配置 & Session State 初始化（完善缺失默认值+补全参数） --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
@@ -31,18 +28,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# 初始化月份选择状态（保留，放在set_page_config之后即可）
+if "selected_months" not in st.session_state:
+    st.session_state.selected_months = []  # 初始为空，避免状态缺失
+
 if "initialized" not in st.session_state:
-    # 基础信息默认值
+    # 基础信息默认值（清理重复赋值）
     st.session_state.current_year = 2025
     st.session_state.current_region = "总部"
-    st.session_state.current_province = REGIONS["总部"][0]  # 联动区域默认省份
+    st.session_state.current_province = REGIONS["总部"][0]  # 联动区域默认省份（无需重复赋值）
     st.session_state.current_power_plant = "示例电厂"
     st.session_state.current_plant_type = "风电"
     st.session_state.installed_capacity = 0.0
-    st.session_state.current_region = "总部"
-    st.session_state.current_province = "北京"
-    st.session_state.batch_mech_price = 0.0  # 批量-机制电价
-    st.session_state.batch_gua_price = 0.0   # 批量-保障性电价
     
     # 光伏套利时段默认配置（首次运行不报错）
     st.session_state["pv_core_start_key"] = 11
@@ -56,7 +53,6 @@ if "initialized" not in st.session_state:
     
     # 数据存储容器
     st.session_state.monthly_data = {}  # 分月基础数据
-    st.session_state.selected_months = []  # 选中的月份
     st.session_state.trade_power_typical = {}  # 方案一结果
     st.session_state.trade_power_arbitrage = {}  # 方案二结果
     st.session_state.market_hours = {}  # 分月市场化小时数
@@ -64,7 +60,16 @@ if "initialized" not in st.session_state:
     st.session_state.total_annual_trade = 0.0  # 年度总电量
     st.session_state.calculated = False  # 是否已生成方案
     
-    # 分月电量参数（每个月独立存储）
+    # 批量应用的默认参数（含新增电价，统一放在前面，逻辑更清晰）
+    st.session_state.batch_mech_mode = "小时数"
+    st.session_state.batch_mech_value = 0.0
+    st.session_state.batch_gua_mode = "小时数"
+    st.session_state.batch_gua_value = 0.0
+    st.session_state.batch_mech_price = 0.0  # 批量-机制电价（新增）
+    st.session_state.batch_gua_price = 0.0   # 批量-保障性电价（新增）
+    st.session_state.batch_limit_rate = 0.0
+    
+    # 分月电量参数（每个月独立存储，含新增电价）
     st.session_state.monthly_params = {
         month: {  # 1-12月，每个月对应独立参数
             "mechanism_mode": "小时数",    # 机制电量输入模式
@@ -77,15 +82,23 @@ if "initialized" not in st.session_state:
         } for month in range(1, 13)
     }
     
-    # 批量应用的默认参数（用于批量设置时的初始值）
-    st.session_state.batch_mech_mode = "小时数"
-    st.session_state.batch_mech_value = 0.0
-    st.session_state.batch_gua_mode = "小时数"
-    st.session_state.batch_gua_value = 0.0
-    st.session_state.batch_limit_rate = 0.0
-    
     # 标记初始化完成
     st.session_state.initialized = True
+
+# -------------------------- 关键补充：参数补全（兼容旧Session State，避免AttributeError） --------------------------
+else:
+    # 补全批量电价参数（如果之前运行过旧版本，没有这两个参数时自动新增）
+    if "batch_mech_price" not in st.session_state:
+        st.session_state.batch_mech_price = 0.0
+    if "batch_gua_price" not in st.session_state:
+        st.session_state.batch_gua_price = 0.0
+    
+    # 补全分月电价参数（每个月都检查，确保不遗漏）
+    for month in range(1, 13):
+        if "mechanism_price" not in st.session_state.monthly_params[month]:
+            st.session_state.monthly_params[month]["mechanism_price"] = 0.0
+        if "guaranteed_price" not in st.session_state.monthly_params[month]:
+            st.session_state.monthly_params[month]["guaranteed_price"] = 0.0
 
 # -------------------------- 核心工具函数 --------------------------
 def get_days_in_month(year, month):
