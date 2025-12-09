@@ -1183,27 +1183,25 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
         
         try:
             # 保持联动逻辑：实时读最新数据
-            typical_df = st.session_state.trade_power_typical.get(view_month, pd.DataFrame())
-            required_cols = ["时段", "方案一月度电量(MWh)"]
-            if typical_df.empty or not all(col in typical_df.columns for col in required_cols):
-                st.info("⚠️ 暂无有效方案一数据（数据为空或缺少必要列）")
+            arbitrage_df = st.session_state.trade_power_arbitrage.get(view_month, pd.DataFrame())
+            required_cols = ["时段", "方案二月度电量(MWh)"]
+            if arbitrage_df.empty or not all(col in arbitrage_df.columns for col in required_cols):
+                st.info("⚠️ 暂无有效方案二数据（数据为空或缺少必要列）")
                 pass
             else:
                 base_df = st.session_state.monthly_data.get(view_month, None)
                 if base_df is None or base_df.empty:
                     st.info("⚠️ 缺少基础价格数据，仅展示交易量图表")
-                    # 纯交易量交互式柱状图
                     import plotly.express as px
                     fig = px.bar(
-                        typical_df,
+                        arbitrage_df,
                         x="时段",
-                        y="方案一月度电量(MWh)",
-                        title=f"{view_month}月 方案一交易量",
-                        labels={"方案一月度电量(MWh)": "交易量（MWh）", "时段": "时段（点）"},
-                        color_discrete_sequence=["#4299e1"],  # 柔和蓝色
+                        y="方案二月度电量(MWh)",
+                        title=f"{view_month}月 方案二交易量",
+                        labels={"方案二月度电量(MWh)": "交易量（MWh）", "时段": "时段（点）"},
+                        color_discrete_sequence=["#e53e3e"],  # 柔和红
                         height=350
                     )
-                    # 视觉优化：去除背景网格、调整字体
                     fig.update_layout(
                         plot_bgcolor="white",
                         xaxis_showgrid=False,
@@ -1211,12 +1209,12 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
                         yaxis_gridcolor="#f0f0f0",
                         font=dict(family="Arial", size=11),
                         title_font=dict(size=13, weight="bold"),
-                        margin=dict(l=10, r=10, t=30, b=10)  # 紧凑边距
+                        margin=dict(l=10, r=10, t=30, b=10)
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    # 准备数据（确保长度一致）
-                    merged_data = typical_df[["时段", "方案一月度电量(MWh)"]].copy()
+                    # 准备数据
+                    merged_data = arbitrage_df[["时段", "方案二月度电量(MWh)"]].copy()
                     if len(base_df) >= 24:
                         merged_data["现货价格"] = base_df["现货价格(元/MWh)"].head(24).values
                         merged_data["中长期价格"] = base_df["中长期价格(元/MWh)"].head(24).values
@@ -1224,60 +1222,56 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
                         merged_data["现货价格"] = 0.0
                         merged_data["中长期价格"] = 0.0
 
-                    # 用 Plotly 创建双轴交互式图表
                     import plotly.graph_objects as go
                     fig = go.Figure()
 
-                    # 1. 交易量柱状图（左轴）
+                    # 交易量柱状图（左轴）
                     fig.add_trace(go.Bar(
                         x=merged_data["时段"],
-                        y=merged_data["方案一月度电量(MWh)"],
-                        name="方案一交易量",
+                        y=merged_data["方案二月度电量(MWh)"],
+                        name="方案二交易量",
                         yaxis="y1",
-                        marker_color="#4299e1",  # 柔和蓝
+                        marker_color="#e53e3e",  # 柔和红
                         opacity=0.8,
                         hovertemplate="时段：%{x}点<br>交易量：%{y:.2f} MWh<extra></extra>"
                     ))
 
-                    # 2. 现货价格折线（右轴）
+                    # 现货价格折线（右轴）
                     fig.add_trace(go.Scatter(
                         x=merged_data["时段"],
                         y=merged_data["现货价格"],
                         name="现货价格",
                         yaxis="y2",
                         mode="lines+markers",
-                        line=dict(color="#9f7aea", width=2),  # 柔和紫
+                        line=dict(color="#9f7aea", width=2),
                         marker=dict(size=4),
                         hovertemplate="时段：%{x}点<br>现货价格：%{y:.2f} 元/MWh<extra></extra>"
                     ))
 
-                    # 3. 中长期价格折线（右轴）
+                    # 中长期价格折线（右轴）
                     fig.add_trace(go.Scatter(
                         x=merged_data["时段"],
                         y=merged_data["中长期价格"],
                         name="中长期价格",
                         yaxis="y2",
                         mode="lines+markers",
-                        line=dict(color="#38b2ac", width=2),  # 柔和青
+                        line=dict(color="#38b2ac", width=2),
                         marker=dict(size=4),
                         hovertemplate="时段：%{x}点<br>中长期价格：%{y:.2f} 元/MWh<extra></extra>"
                     ))
 
-                    # 视觉+布局优化（核心！）
+                    # 视觉优化（和方案一保持风格统一）
                     fig.update_layout(
-                        # 标题
-                        title=f"{view_month}月 方案一交易量与价格对比",
+                        title=f"{view_month}月 方案二交易量与价格对比",
                         title_font=dict(size=13, weight="bold", family="Arial"),
-                        title_x=0.5,  # 居中
-                        # 背景
+                        title_x=0.5,
                         plot_bgcolor="white",
                         paper_bgcolor="white",
-                        # 双轴设置
                         yaxis1=dict(
                             title="交易量（MWh）",
-                            title_font=dict(color="#4299e1"),
-                            tickfont=dict(color="#4299e1"),
-                            gridcolor="#f0f0f0"  # 淡灰网格
+                            title_font=dict(color="#e53e3e"),
+                            tickfont=dict(color="#e53e3e"),
+                            gridcolor="#f0f0f0"
                         ),
                         yaxis2=dict(
                             title="价格（元/MWh）",
@@ -1285,32 +1279,28 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
                             tickfont=dict(color="#9f7aea"),
                             overlaying="y",
                             side="right",
-                            gridcolor="rgba(0,0,0,0)"  # 隐藏右轴网格，避免重叠
+                            gridcolor="rgba(0,0,0,0)"
                         ),
-                        # 图例
                         legend=dict(
-                            orientation="h",  # 水平排列
+                            orientation="h",
                             yanchor="bottom",
-                            y=-0.2,  # 放在图表下方，不挡数据
+                            y=-0.2,
                             xanchor="center",
                             x=0.5
                         ),
-                        # 边距（紧凑不浪费空间）
                         margin=dict(l=20, r=20, t=30, b=60),
-                        # x轴优化
                         xaxis=dict(
                             title="时段（点）",
                             tickmode="array",
-                            tickvals=merged_data["时段"],  # 显示所有24时段
+                            tickvals=merged_data["时段"],
                             gridcolor="#f0f0f0"
                         )
                     )
 
-                    # 在 Streamlit 中显示（支持交互）
                     st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
-            st.warning(f"📊 方案一图表生成失败：{str(e)}（不影响数据导出）")
+            st.warning(f"📊 方案二图表生成失败：{str(e)}（不影响数据导出）")
         
         # 3. 双方案日分解展示（四列数据）
         st.subheader(f"3. {view_month}月双方案日分解电量（四列数据）")
