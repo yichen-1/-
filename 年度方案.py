@@ -819,14 +819,27 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选
+# 3. 月份多选（增加全选按钮）
 with col_import3:
-    st.session_state.selected_months = st.multiselect(
-        "选择需要处理的月份",
-        list(range(1, 13)),
-        default=st.session_state.selected_months,
-        key="month_multiselect"
-    )
+    # 用Columns排版：左侧多选框，右侧全选按钮
+    col_ms, col_btn = st.columns([8, 2])
+    with col_ms:
+        st.session_state.selected_months = st.multiselect(
+            "选择需要处理的月份",
+            list(range(1, 13)),
+            default=st.session_state.selected_months,
+            key="month_multiselect"
+        )
+    with col_btn:
+        # 全选按钮：点击后选中1-12月，刷新页面生效
+        if st.button("全选月份", key="select_all_months", use_container_width=True):
+            st.session_state.selected_months = list(range(1, 13))  # 设置为所有月份
+            st.rerun()  # 刷新页面，让多选框显示全选状态
+        if st.button("取消全选", key="deselect_all_months", use_container_width=True):
+            st.session_state.selected_months = []
+            st.rerun()
+
+    # 选中月份提示（保持原有逻辑）
     if st.session_state.selected_months:
         st.info(f"当前选中月份：{', '.join([f'{m}月' for m in st.session_state.selected_months])}")
     else:
