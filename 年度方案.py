@@ -942,7 +942,7 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度双方案（修复：解决阻塞+数据类型+字段匹配）
+# 2. 生成年度双方案（重点修复：严格过滤无效数据）
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
         if not st.session_state.selected_months or not st.session_state.monthly_data:
@@ -951,144 +951,70 @@ with col_data2:
             st.warning("⚠️ 请填写有效的装机容量（>0）")
         else:
             with st.spinner("🔄 正在计算年度双方案..."):
-                # 初始化变量（确保每次点击都重新初始化）
-                trade_typical = {}
-                trade_arbitrage = {}
-                market_hours = {}
-                gen_hours = {}
-                total_annual = 0.0
-                valid_calculated_months = []
-                monthly_profit_typical = {}
-                monthly_profit_arbitrage = {}
-
-                # 用进度条替代循环st.write，避免UI阻塞
-                progress_bar = st.progress(0, text="初始化计算...")
-                total_steps = len(st.session_state.selected_months)
-                step = 0
-
                 try:
-                    # -------------------------- 原有方案生成逻辑（仅修复进度条）--------------------------
+                    trade_typical = {}
+                    trade_arbitrage = {}
+                    market_hours = {}
+                    gen_hours = {}
+                    total_annual = 0.0
+                    valid_calculated_months = []  # 记录成功计算的月份
+                    
                     for month in st.session_state.selected_months:
-                        step += 1
-                        progress_bar.progress(step/total_steps, text=f"处理月份：{month}月（方案生成）")
-                        
-                        # 计算核心参数
+                        # 计算核心参数（仅传2个参数，内部读取分月参数）
                         if st.session_state.auto_calculate:
                             gh, mh = calculate_core_params_monthly(month, st.session_state.installed_capacity)
                         else:
+                            # 手动模式：发电小时数按分月参数计算，市场化小时数用手动输入
                             gh, _ = calculate_core_params_monthly(month, st.session_state.installed_capacity)
                             mh = st.session_state.manual_market_hours
                         
+                        # 校验市场化小时数有效性
                         if mh <= 0:
-                            # 用st.info替代st.warning，减少UI输出
-                            st.info(f"ℹ️ 月份{month}市场化小时数为0，跳过该月份")
+                            st.warning(f"⚠️ 月份{month}市场化小时数为0，跳过该月份")
                             continue
                         
                         market_hours[month] = mh   
                         gen_hours[month] = gh
                         
-                        # 方案一计算
+                        # 方案一：典型曲线（校验返回结果）
                         typical_df, total_typical = calculate_trade_power_typical(month, mh, st.session_state.installed_capacity)
                         if typical_df is None or typical_df.empty or "方案一月度电量(MWh)" not in typical_df.columns:
-                            st.info(f"ℹ️ 月份{month}典型方案计算失败，跳过该月份")
+                            st.error(f"❌ 月份{month}典型方案计算失败，跳过该月份")
                             continue
                         
-                        # 方案二计算
+                        # 方案二：光伏套利/风电直线（校验返回结果）
                         arbitrage_df = calculate_trade_power_arbitrage(month, total_typical, typical_df)
                         if arbitrage_df is None or arbitrage_df.empty or "方案二月度电量(MWh)" not in arbitrage_df.columns:
-                            st.info(f"ℹ️ 月份{month}方案二计算失败，跳过该月份")
+                            st.error(f"❌ 月份{month}方案二计算失败，跳过该月份")
                             continue
                         
-                        # 存储方案数据
+                        # 只有两个方案都成功才存入会话状态
                         trade_typical[month] = typical_df
                         trade_arbitrage[month] = arbitrage_df
                         total_annual += total_typical
                         valid_calculated_months.append(month)
-
-                    # -------------------------- 方案生成成功后，计算收益（修复核心错误）--------------------------
+                    
+                    # 只有有有效计算结果才更新会话状态
                     if valid_calculated_months:
-                        progress_bar.progress(1.0, text=f"方案生成完成，共{len(valid_calculated_months)}个有效月份，开始计算收益...")
-                        
-                        for month in valid_calculated_months:
-                            try:
-                                # 1. 正确提取数据：month_data是DataFrame，不是字典！
-                                month_df = st.session_state.monthly_data.get(month, pd.DataFrame())
-                                params = st.session_state.monthly_params.get(month, {})
-                                typical_df = trade_typical[month]
-                                arbitrage_df = trade_arbitrage[month]
-
-                                # 2. 修复：从DataFrame中正确提取数据（字段名匹配模板）
-                                # 累计发电量 = 当月各时段累计发电量求和
-                                total_gen = month_df["当月各时段累计发电量(MWh)"].sum() if not month_df.empty else 0.0
-                                # 电价数据（匹配模板字段名：现货价格(元/MWh)、中长期价格(元/MWh)）
-                                mid_long_price = month_df["中长期价格(元/MWh)"].mean() if not month_df.empty else 0.0  # 取平均电价
-                                spot_price = month_df["现货价格(元/MWh)"].mean() if not month_df.empty else 0.0
-
-                                # 3. 电量参数（强制转浮点数，避免类型错误）
-                                mech_power = float(params.get("mechanism_value", 0.0))
-                                gua_power = float(params.get("guaranteed_value", 0.0))
-                                plan1_power = float(typical_df["方案一月度电量(MWh)"].sum()) if not typical_df.empty else 0.0
-                                plan2_power = float(arbitrage_df["方案二月度电量(MWh)"].sum()) if not arbitrage_df.empty else 0.0
-
-                                # 4. 电价参数（强制转浮点数）
-                                mech_price = float(params.get("mechanism_price", 0.0))
-                                gua_price = float(params.get("guaranteed_price", 0.0))
-
-                                # 5. 简单计算（无复杂逻辑，避免卡点）
-                                spot_power_plan1 = max(0.0, total_gen - mech_power - gua_power - plan1_power)
-                                spot_power_plan2 = max(0.0, total_gen - mech_power - gua_power - plan2_power)
-
-                                total_profit1 = (mech_power * mech_price) + (gua_power * gua_price) + (plan1_power * mid_long_price) + (spot_power_plan1 * spot_price)
-                                total_profit2 = (mech_power * mech_price) + (gua_power * gua_price) + (plan2_power * mid_long_price) + (spot_power_plan2 * spot_price)
-
-                                # 存储收益（只存关键数据）
-                                monthly_profit_typical[month] = {
-                                    "月份": f"{month}月",
-                                    "总收益(方案一)(元)": round(total_profit1, 2)
-                                }
-                                monthly_profit_arbitrage[month] = {
-                                    "月份": f"{month}月",
-                                    "总收益(方案二)(元)": round(total_profit2, 2)
-                                }
-
-                            except Exception as e:
-                                st.info(f"ℹ️ 月份{month}收益计算失败（不影响方案）：{str(e)}")
-                                continue
-
-                        # 更新会话状态
                         st.session_state.trade_power_typical = trade_typical
                         st.session_state.trade_power_arbitrage = trade_arbitrage
                         st.session_state.market_hours = market_hours
                         st.session_state.gen_hours = gen_hours
                         st.session_state.total_annual_trade = total_annual
-                        st.session_state.monthly_profit_typical = monthly_profit_typical
-                        st.session_state.monthly_profit_arbitrage = monthly_profit_arbitrage
                         st.session_state.calculated = True
-
+                        
                         st.success(
-                            f"✅ 年度双方案+收益生成成功！\n"
+                            f"✅ 年度双方案生成成功！\n"
                             f"成功计算月份：{', '.join([f'{m}月' for m in valid_calculated_months])}\n"
                             f"年度总交易电量：{round(total_annual, 2)} MWh"
                         )
-
                     else:
                         st.error("❌ 所有选中月份的方案计算均失败，请检查基础数据和参数配置！")
-                        st.session_state.calculated = False
-                        st.session_state.monthly_profit_typical = {}
-                        st.session_state.monthly_profit_arbitrage = {}
-
-                    # 关闭进度条
-                    progress_bar.empty()
-
+                        st.session_state.calculated = False  # 标记为未计算成功
+                    
                 except Exception as e:
-                    # 关闭进度条，显示错误
-                    progress_bar.empty()
-                    st.error(f"❌ 生成方案/收益失败：{str(e)}")
+                    st.error(f"❌ 生成方案失败：{str(e)}")
                     st.session_state.calculated = False
-                    st.session_state.trade_power_typical = {}
-                    st.session_state.trade_power_arbitrage = {}
-                    st.session_state.monthly_profit_typical = {}
-                    st.session_state.monthly_profit_arbitrage = {}
 
 # 3. 导出年度方案
 with col_data3:
