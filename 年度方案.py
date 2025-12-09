@@ -1604,6 +1604,159 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
 
 else:
     st.warning("⚠️ 请先生成年度方案后再进行电量调整")
+    # -------------------------- 新增：收益计算功能（最后追加，不影响原有功能）--------------------------
+st.divider()
+st.header("💰 双方案收益计算（实时同步电量调整结果）")
+
+# 仅当方案生成成功且有有效数据时计算收益
+if st.session_state.calculated and st.session_state.trade_power_typical and st.session_state.trade_power_arbitrage:
+    # 过滤有完整收益数据的月份（需包含电量+价格数据）
+    valid_profit_months = []
+    for month in st.session_state.selected_months:
+        # 校验方案数据（电量）
+        has_plan1 = (month in st.session_state.trade_power_typical 
+                    and not st.session_state.trade_power_typical[month].empty
+                    and "方案一月度电量(MWh)" in st.session_state.trade_power_typical[month].columns)
+        has_plan2 = (month in st.session_state.trade_power_arbitrage 
+                    and not st.session_state.trade_power_arbitrage[month].empty
+                    and "方案二月度电量(MWh)" in st.session_state.trade_power_arbitrage[month].columns)
+        # 校验价格数据（现货+中长期，至少有一个价格不为0）
+        has_price = (month in st.session_state.monthly_data 
+                    and not st.session_state.monthly_data[month].empty
+                    and "现货价格(元/MWh)" in st.session_state.monthly_data[month].columns
+                    and "中长期价格(元/MWh)" in st.session_state.monthly_data[month].columns
+                    and (st.session_state.monthly_data[month]["现货价格(元/MWh)"].sum() > 0 
+                         or st.session_state.monthly_data[month]["中长期价格(元/MWh)"].sum() > 0))
+        
+        if has_plan1 and has_plan2 and has_price:
+            valid_profit_months.append(month)
+    
+    if valid_profit_months:
+        # 选择收益计算的月份（默认全选有效月份）
+        profit_months = st.multiselect(
+            "选择需要计算收益的月份",
+            options=valid_profit_months,
+            default=valid_profit_months,
+            key="profit_month_select",
+            format_func=lambda x: f"{x}月"
+        )
+        
+        if profit_months:
+            # 初始化年度收益汇总
+            annual_profit_plan1 = 0.0  # 方案一年度总收益
+            annual_profit_plan2 = 0.0  # 方案二年度总收益
+            monthly_profit_list = []   # 月度收益明细
+            
+            # 循环计算每个选中月份的收益
+            for month in profit_months:
+                plan1_df = st.session_state.trade_power_typical[month].copy()
+                plan2_df = st.session_state.trade_power_arbitrage[month].copy()
+                price_df = st.session_state.monthly_data[month].copy()
+                
+                # 取前24时段数据（确保电量和价格一一对应）
+                plan1_power = plan1_df["方案一月度电量(MWh)"].head(24).values
+                plan2_power = plan2_df["方案二月度电量(MWh)"].head(24).values
+                spot_price = price_df["现货价格(元/MWh)"].head(24).values
+                mid_long_price = price_df["中长期价格(元/MWh)"].head(24).values
+                
+                # 计算时段收益（电量×价格，价格优先取现货，现货为0则取中长期）
+                plan1_hourly_profit = []
+                plan2_hourly_profit = []
+                for i in range(24):
+                    # 选择有效价格（现货>0用现货，否则用中长期）
+                    use_price = spot_price[i] if spot_price[i] > 0 else mid_long_price[i]
+                    use_price = max(use_price, 0)  # 避免负价格导致收益异常
+                    
+                    # 计算单个时段收益
+                    p1_profit = round(plan1_power[i] * use_price, 2)
+                    p2_profit = round(plan2_power[i] * use_price, 2)
+                    
+                    plan1_hourly_profit.append(p1_profit)
+                    plan2_hourly_profit.append(p2_profit)
+                
+                # 计算月度总收益
+                monthly_profit1 = sum(plan1_hourly_profit)
+                monthly_profit2 = sum(plan2_hourly_profit)
+                
+                # 累加年度收益
+                annual_profit_plan1 += monthly_profit1
+                annual_profit_plan2 += monthly_profit2
+                
+                # 保存月度明细
+                monthly_profit_list.append({
+                    "月份": f"{month}月",
+                    "方案一收益（元）": monthly_profit1,
+                    "方案二收益（元）": monthly_profit2,
+                    "收益差值（方案二-方案一）": round(monthly_profit2 - monthly_profit1, 2)
+                })
+            
+            # 1. 显示月度收益明细表格
+            st.subheader("📋 月度收益明细")
+            profit_detail_df = pd.DataFrame(monthly_profit_list)
+            st.dataframe(
+                profit_detail_df,
+                use_container_width=True,
+                column_config={
+                    "月份": st.column_config.TextColumn("月份", width="small"),
+                    "方案一收益（元）": st.column_config.NumberColumn("方案一收益（元）", format="%.2f"),
+                    "方案二收益（元）": st.column_config.NumberColumn("方案二收益（元）", format="%.2f"),
+                    "收益差值（方案二-方案一）": st.column_config.NumberColumn(
+                        "收益差值（方案二-方案一）",
+                        format="%.2f",
+                        cell_type=st.column_config.NumberColumn.CellType.NUMBER,
+                        help="正值表示方案二更优，负值表示方案一更优"
+                    )
+                }
+            )
+            
+            # 2. 显示年度收益汇总
+            st.subheader("📊 年度收益汇总")
+            col_p1, col_p2, col_diff = st.columns(3, gap="large")
+            
+            with col_p1:
+                st.metric(
+                    label="方案一年度总收益",
+                    value=f"¥{round(annual_profit_plan1, 2):,.2f}",
+                    delta=None,
+                    help="基于典型曲线电量计算"
+                )
+            
+            with col_p2:
+                st.metric(
+                    label="方案二年度总收益",
+                    value=f"¥{round(annual_profit_plan2, 2):,.2f}",
+                    delta=None,
+                    help="基于套利/直线曲线电量计算"
+                )
+            
+            with col_diff:
+                profit_diff = round(annual_profit_plan2 - annual_profit_plan1, 2)
+                delta_color = "normal" if profit_diff == 0 else ("inverse" if profit_diff < 0 else "off")
+                st.metric(
+                    label="方案二相对方案一收益差",
+                    value=f"¥{profit_diff:,.2f}",
+                    delta=f"{profit_diff/annual_profit_plan1*100:.2f}%" if annual_profit_plan1 != 0 else "无参考",
+                    delta_color=delta_color,
+                    help="正值=方案二更优，负值=方案一更优"
+                )
+            
+            # 3. 收益计算说明
+            st.caption("""
+            📌 收益计算规则：
+            1. 价格优先级：优先使用「现货价格」，现货价格为0时使用「中长期价格」；
+            2. 时段收益=时段电量 × 对应价格（保留2位小数）；
+            3. 实时同步：手动调整电量后，收益会自动重新计算（无需额外操作）；
+            4. 数据安全：收益计算不修改任何原始数据，仅基于现有方案和价格数据统计。
+            """)
+        
+        else:
+            st.info("ℹ️ 请选择需要计算收益的月份")
+    
+    else:
+        st.info("ℹ️ 暂无有效收益计算数据，请确保：1. 生成了年度方案 2. 模板中填写了现货/中长期价格（非0） 3. 选中月份有完整数据")
+
+else:
+    st.warning("⚠️ 请先生成年度方案后，再计算收益")
 
 # 页脚
 st.divider()
