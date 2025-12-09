@@ -6,6 +6,9 @@ from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 import matplotlib.pyplot as plt  # 新增：导入matplotlib
+# 初始化月份选择状态（必须放在最前面！）
+if "selected_months" not in st.session_state:
+    st.session_state.selected_months = []  # 初始为空，避免状态缺失
 
 # -------------------------- 必备：区域-省份映射字典（合并去重，保留详细版本） --------------------------
 REGIONS = {
@@ -819,25 +822,24 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（增加全选按钮）
+# 3. 月份多选（全选/取消全选修复版）
 with col_import3:
-    # 用Columns排版：左侧多选框，右侧全选按钮
-    col_ms, col_btn = st.columns([8, 2])
-    with col_ms:
-        st.session_state.selected_months = st.multiselect(
-            "选择需要处理的月份",
-            list(range(1, 13)),
-            default=st.session_state.selected_months,
-            key="month_multiselect"
-        )
-    with col_btn:
-        # 全选按钮：点击后选中1-12月，刷新页面生效
+    # 第一步：先处理全选/取消全选按钮（必须在multiselect之前）
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
         if st.button("全选月份", key="select_all_months", use_container_width=True):
-            st.session_state.selected_months = list(range(1, 13))  # 设置为所有月份
-            st.rerun()  # 刷新页面，让多选框显示全选状态
+            st.session_state.selected_months = list(range(1, 13))  # 选中1-12月
+    with col_btn2:
         if st.button("取消全选", key="deselect_all_months", use_container_width=True):
-            st.session_state.selected_months = []
-            st.rerun()
+            st.session_state.selected_months = []  # 清空选中
+
+    # 第二步：再渲染multiselect（读取按钮修改后的session_state）
+    st.session_state.selected_months = st.multiselect(
+        "选择需要处理的月份",
+        list(range(1, 13)),
+        default=st.session_state.selected_months,  # 此时已拿到按钮修改后的状态
+        key="month_multiselect"
+    )
 
     # 选中月份提示（保持原有逻辑）
     if st.session_state.selected_months:
