@@ -1603,11 +1603,11 @@ if st.session_state.calculated and st.session_state.trade_power_typical:
 
 else:
     st.warning("⚠️ 请先生成年度方案后再进行电量调整")
-    # -------------------------- 新增：收益计算功能（最后追加，不影响原有功能）--------------------------
+# -------------------------- 新增：收益计算功能（缩进+逻辑修复）--------------------------
 st.divider()
 st.header("💰 双方案收益计算（实时同步电量调整结果）")
 
-# 仅当方案生成成功且有有效数据时计算收益
+# 仅当方案生成成功且有有效数据时计算收益（最外层if）
 if st.session_state.calculated and st.session_state.trade_power_typical and st.session_state.trade_power_arbitrage:
     # 过滤有完整收益数据的月份（需包含电量+价格数据）
     valid_profit_months = []
@@ -1630,6 +1630,7 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
         if has_plan1 and has_plan2 and has_price:
             valid_profit_months.append(month)
     
+    # 第一层嵌套if：有有效收益月份
     if valid_profit_months:
         # 选择收益计算的月份（默认全选有效月份）
         profit_months = st.multiselect(
@@ -1640,6 +1641,7 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
             format_func=lambda x: f"{x}月"
         )
         
+        # 第二层嵌套if：选择了计算月份
         if profit_months:
             # 初始化年度收益汇总
             annual_profit_plan1 = 0.0  # 方案一年度总收益
@@ -1681,40 +1683,45 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
                 annual_profit_plan1 += monthly_profit1
                 annual_profit_plan2 += monthly_profit2
                 
-                # 保存月度明细
+                # 保存月度明细（含更优方案标记）
+                if monthly_profit1 > monthly_profit2:
+                    better_plan = f"**<span style='color: #22c55e'>方案一</span>**"
+                elif monthly_profit2 > monthly_profit1:
+                    better_plan = f"**<span style='color: #ef4444'>方案二</span>**"
+                else:
+                    better_plan = f"**<span style='color: #64748b'>持平</span>**"
+                
                 monthly_profit_list.append({
                     "月份": f"{month}月",
                     "方案一收益（元）": monthly_profit1,
                     "方案二收益（元）": monthly_profit2,
-                    "收益差值（方案二-方案一）": round(monthly_profit2 - monthly_profit1, 2)
+                    "收益差值（方案二-方案一）": round(monthly_profit2 - monthly_profit1, 2),
+                    "更优方案": better_plan
                 })
             
-            # 1. 显示月度收益明细表格（新增「更优方案」+ 年度汇总行）
-            st.subheader("📋 分月收益对比（含月度更优方案）")
-            # 计算每个月的「更优方案」
-            for item in monthly_profit_list:
-                p1 = item["方案一收益（元）"]
-                p2 = item["方案二收益（元）"]
-                if p1 > p2:
-                    item["更优方案"] = "方案一"
-                elif p2 > p1:
-                    item["更优方案"] = "方案二"
-                else:
-                    item["更优方案"] = "持平"
-
             # 生成月度数据DataFrame
             profit_detail_df = pd.DataFrame(monthly_profit_list)
+            
             # 追加「年度汇总行」
-            annual_summary = {
+            annual_better_plan = (
+                f"**<span style='color: #22c55e'>方案一</span>**" if annual_profit_plan1 > annual_profit_plan2
+                else f"**<span style='color: #ef4444'>方案二</span>**" if annual_profit_plan2 > annual_profit_plan1
+                else f"**<span style='color: #64748b'>持平</span>**"
+            )
+            
+            annual_summary = pd.DataFrame([{
                 "月份": "年度汇总",
                 "方案一收益（元）": annual_profit_plan1,
                 "方案二收益（元）": annual_profit_plan2,
                 "收益差值（方案二-方案一）": round(annual_profit_plan2 - annual_profit_plan1, 2),
-                "更优方案": "方案一" if annual_profit_plan1 > annual_profit_plan2 else "方案二" if annual_profit_plan2 > annual_profit_plan1 else "持平"
-            }
-            profit_detail_df = pd.concat([profit_detail_df, pd.DataFrame([annual_summary])], ignore_index=True)
-
-            # 显示表格（新增样式：更优方案标色）
+                "更优方案": annual_better_plan
+            }])
+            
+            # 合并月度数据和汇总行
+            profit_detail_df = pd.concat([profit_detail_df, annual_summary], ignore_index=True)
+            
+            # 显示分月收益对比表格
+            st.subheader("📋 分月收益对比（含月度更优方案）")
             st.dataframe(
                 profit_detail_df,
                 use_container_width=True,
@@ -1729,21 +1736,12 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
                     ),
                     "更优方案": st.column_config.TextColumn(
                         "更优方案",
-                        # 给更优方案加颜色标识
-                        cell_type=st.column_config.TextColumn.CellType.MARKDOWN,
-                        help="当月收益更高的方案"
+                        help="当月收益更高的方案（绿色=方案一，红色=方案二，灰色=持平）"
                     )
                 }
             )
-
-            # 给「更优方案」列加颜色（用Markdown语法）
-            profit_detail_df["更优方案"] = profit_detail_df["更优方案"].apply(
-                lambda x: f"**<span style='color: #22c55e'>{x}</span>**" if x == "方案一" 
-                else f"**<span style='color: #ef4444'>{x}</span>**" if x == "方案二" 
-                else f"**<span style='color: #64748b'>{x}</span>**"
-                )
             
-            # 2. 显示年度收益汇总
+            # 显示年度收益汇总（卡片式）
             st.subheader("📊 年度收益汇总")
             col_p1, col_p2, col_diff = st.columns(3, gap="large")
             
@@ -1774,7 +1772,7 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
                     help="正值=方案二更优，负值=方案一更优"
                 )
             
-            # 3. 收益计算说明
+            # 收益计算说明（放在最内层if里，只有选择了月份才显示）
             st.caption("""
             📌 收益计算规则：
             1. 价格优先级：优先使用「现货价格」，现货价格为0时使用「中长期价格」；
@@ -1783,12 +1781,15 @@ if st.session_state.calculated and st.session_state.trade_power_typical and st.s
             4. 数据安全：收益计算不修改任何原始数据，仅基于现有方案和价格数据统计。
             """)
         
+        # 对应第二层if：未选择计算月份
         else:
             st.info("ℹ️ 请选择需要计算收益的月份")
     
+    # 对应第一层if：无有效收益月份
     else:
         st.info("ℹ️ 暂无有效收益计算数据，请确保：1. 生成了年度方案 2. 模板中填写了现货/中长期价格（非0） 3. 选中月份有完整数据")
 
+# 对应最外层if：未生成方案
 else:
     st.warning("⚠️ 请先生成年度方案后，再计算收益")
 
