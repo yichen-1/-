@@ -822,7 +822,7 @@ with col_import2:
             st.session_state.selected_months = sorted(list(monthly_data.keys()))
             st.success(f"✅ 批量导入成功！共导入{len(monthly_data)}个月份数据")
 
-# 3. 月份多选（全选后自动显示12个月+支持取消个别）
+# 3. 月份多选（全选后显示12月+支持取消个别+无报错）
 with col_import3:
     st.subheader("选择需要处理的月份", divider="gray")
     
@@ -831,7 +831,7 @@ with col_import3:
     with col_btn1:
         if st.button("📅 全选1-12月", key="select_all_months_final", type="primary", use_container_width=True):
             st.session_state.selected_months = list(range(1, 13))
-            st.success("✅ 已全选所有月份！")
+            st.success("✅ 已全选所有月份！下拉框中可取消个别月份")
             st.rerun()
     with col_btn2:
         if st.button("❌ 取消全选", key="deselect_all_months_final", use_container_width=True):
@@ -839,15 +839,14 @@ with col_import3:
             st.success("✅ 已取消所有选择！")
             st.rerun()
     
-    # 手动微调区域：默认显示已选的12个月，支持取消个别
+    # 手动微调区域：去掉不支持的use_container_width，保留核心功能
     st.write("### 手动微调（可取消个别月份）")
     manual_selected = st.multiselect(
-        label="当前已选月份（点击下拉框可取消）",
+        label="当前已选：{}个月份（点击下拉框取消个别）".format(len(st.session_state.selected_months)),
         options=list(range(1, 13)),  # 所有月份选项
         default=st.session_state.selected_months,  # 全选后自动填入1-12月
         key="month_multiselect_manual",
         format_func=lambda x: f"{x}月",  # 显示为“1月”“2月”
-        use_container_width=True,  # 占满宽度，显示更多已选选项
         placeholder="请选择月份（全选后自动填充）"
     )
     
@@ -856,10 +855,10 @@ with col_import3:
         st.session_state.selected_months = manual_selected
         st.rerun()  # 刷新后显示最新选中状态
     
-    # 状态提示（明确显示已选月份）
+    # 状态提示（明确显示已选月份，避免用户困惑）
     if st.session_state.selected_months:
         months_text = "、".join([f"{m}月" for m in sorted(st.session_state.selected_months)])
-        st.info(f"📌 当前选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
+        st.info(f"📌 当前最终选中：{months_text}（共{len(st.session_state.selected_months)}个月份）")
     else:
         st.warning("⚠️ 请选择需要处理的月份（可点击「全选1-12月」快速选择）")
 
