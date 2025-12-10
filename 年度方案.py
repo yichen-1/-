@@ -1522,7 +1522,7 @@ with col_adjust_3:
         "调整比例", 
         min_value=0.1, max_value=2.0, value=1.0, step=0.01,
         key=f"{unique_prefix_ratio_tune}_ratio_value",
-        help="0.9=原始值×90%、1.0=原始值、1.1=原始值×110%（始终基于原始数据计算）"
+        help="0.9=原始值×90%、1.0=原始值、1.1=原始值×110%（始终基于生成的原始方案计算）"
     )
 
 # 2. 初始化方案数据（核心修复：兼容新旧结构，兜底所有缺失字段）
@@ -1542,7 +1542,7 @@ current_scheme = st.session_state.scheme_power_data[adjust_month][adjust_scheme]
 required_fields = {
     "periods": {},
     "base_total": 0.0,
-    "original_periods": {},
+    "original_periods": {},  # 生成方案时的永久原始锚点
     "original_base_total": 0.0
 }
 for field, default_val in required_fields.items():
@@ -1552,63 +1552,60 @@ for field, default_val in required_fields.items():
 # 安全读取字段（不再报KeyError）
 current_periods = current_scheme["periods"].copy()
 current_base_total = current_scheme["base_total"]
-original_periods = current_scheme["original_periods"].copy()
+original_periods = current_scheme["original_periods"].copy()  # 仅读取生成方案时的原始锚点
 original_base_total = current_scheme["original_base_total"]
 
-# 3. 首次初始化：从原始方案数据读取并保存「原始锚点」
-if not original_periods and st.session_state.get("calculated", False):
-    original_data = None
-    if adjust_scheme == "方案一" and adjust_month in st.session_state.get("trade_power_typical", {}):
-        original_data = st.session_state.trade_power_typical[adjust_month].set_index("时段")["方案一月度电量(MWh)"].to_dict()
-    elif adjust_scheme == "方案二" and adjust_month in st.session_state.get("trade_power_arbitrage", {}):
-        original_data = st.session_state.trade_power_arbitrage[adjust_month].set_index("时段")["方案二月度电量(MWh)"].to_dict()
-    
-    if original_data:
-        original_base_total = sum(original_data.values())
-        # 更新原始锚点（仅首次初始化）
-        current_scheme["original_periods"] = original_data.copy()
-        current_scheme["original_base_total"] = original_base_total
-        # 初始化当前数据为原始数据
-        if not current_periods:
-            current_scheme["periods"] = original_data.copy()
-            current_scheme["base_total"] = original_base_total
+# 3. 核心修复：强制同步原始锚点到当前数据（仅当原始锚点有数据时）
+# 彻底移除动态读取trade_power_typical的逻辑，仅依赖生成方案时的original_periods
+if original_periods and not current_periods:
+    current_scheme["periods"] = original_periods.copy()
+    current_scheme["base_total"] = original_base_total
+    current_periods = current_scheme["periods"].copy()
+    current_base_total = current_scheme["base_total"]
 
 current_actual_total = sum(current_periods.values()) if current_periods else 0.0
 
-# 4. 显示当前数据
+# 4. 显示当前数据（优先展示原始锚点数据）
 col_ori_1, col_ori_2 = st.columns(2)
 with col_ori_1:
     st.write(f"**{adjust_month}月-{adjust_scheme}**")
-    st.write(f"原始基准总量（锚点）：{original_base_total:.2f} MWh")
+    st.write(f"原始基准总量（生成方案锚点）：{original_base_total:.2f} MWh")
     st.write(f"当前基准总量（调整后）：{current_base_total:.2f} MWh")
     st.write(f"当前实际总量：{current_actual_total:.2f} MWh")
 with col_ori_2:
-    if current_periods:
+    # 优先判断原始锚点，无锚点才提示生成方案
+    if not original_periods:
+        st.warning("该方案暂无原始数据，请先点击「生成年度双方案」！")
+    elif current_periods:
         st.write("当前时段电量分布：")
         st.dataframe(
             pd.DataFrame(list(current_periods.items()), columns=["时段", "电量(MWh)"]),
             hide_index=True, use_container_width=True
         )
     else:
-        st.warning("该方案暂无时段电量数据，请先生成方案！")
+        st.write("当前时段电量（同步自原始方案）：")
+        st.dataframe(
+            pd.DataFrame(list(original_periods.items()), columns=["时段", "电量(MWh)"]),
+            hide_index=True, use_container_width=True
+        )
 
-# 5. 执行比例调整（基于原始锚点，避免叠加）
+# 5. 执行比例调整（仅基于生成方案的原始锚点，杜绝叠加）
 if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{unique_prefix_ratio_tune}_ratio_execute"):
     if not original_periods:
-        st.error("调整失败：无原始时段电量数据！")
+        st.error("调整失败：无生成方案的原始数据！请先点击「生成年度双方案」")
     else:
-        # 基于原始锚点计算新值（核心：不再叠加当前数据）
+        # 仅基于生成方案的原始锚点计算，永不叠加
         new_base_total = round(original_base_total * adjust_ratio, 2)
         new_periods = {
             period: round(power * adjust_ratio, 2)
             for period, power in original_periods.items()
         }
         
-        # 更新当前数据（原始锚点不变）
+        # 更新当前数据（原始锚点永不修改）
         current_scheme["periods"] = new_periods
         current_scheme["base_total"] = new_base_total
         
-        # 同步到全局方案数据
+        # 同步到全局方案数据（保证展示模块能读取到）
         if adjust_scheme == "方案一" and adjust_month in st.session_state.get("trade_power_typical", {}):
             st.session_state.trade_power_typical[adjust_month]["方案一月度电量(MWh)"] = st.session_state.trade_power_typical[adjust_month]["时段"].map(new_periods)
         elif adjust_scheme == "方案二" and adjust_month in st.session_state.get("trade_power_arbitrage", {}):
@@ -1616,8 +1613,8 @@ if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{
         
         st.success(f"""
             比例调整完成！
-            计算逻辑：原始基准总量 × 调整比例 = {original_base_total:.2f} × {adjust_ratio} = {new_base_total:.2f} MWh
-            各时段电量已基于原始数据按比例缩放，占比保持不变
+            计算逻辑：生成方案原始总量 × 调整比例 = {original_base_total:.2f} × {adjust_ratio} = {new_base_total:.2f} MWh
+            各时段电量已基于原始方案按比例缩放，占比保持不变
         """)
         st.write("调整后时段电量：")
         st.dataframe(
@@ -1661,33 +1658,24 @@ for field, default_val in required_fields.items():
     if field not in tune_scheme_data:
         tune_scheme_data[field] = default_val
 
+# 仅读取生成方案时的原始锚点，不再动态读取trade_power
 tune_periods = tune_scheme_data["periods"].copy()
 tune_base_total = tune_scheme_data["base_total"]
 tune_original_periods = tune_scheme_data["original_periods"].copy()
+tune_original_base_total = tune_scheme_data["original_base_total"]
 
-# 首次微调时初始化数据
-if not tune_periods and st.session_state.get("calculated", False):
-    if tune_scheme == "方案一" and tune_month in st.session_state.get("trade_power_typical", {}):
-        tune_periods = st.session_state.trade_power_typical[tune_month].set_index("时段")["方案一月度电量(MWh)"].to_dict()
-        tune_base_total = sum(tune_periods.values())
-        tune_scheme_data.update({
-            "periods": tune_periods.copy(),
-            "base_total": tune_base_total,
-            "original_periods": tune_periods.copy(),
-            "original_base_total": tune_base_total
-        })
-    elif tune_scheme == "方案二" and tune_month in st.session_state.get("trade_power_arbitrage", {}):
-        tune_periods = st.session_state.trade_power_arbitrage[tune_month].set_index("时段")["方案二月度电量(MWh)"].to_dict()
-        tune_base_total = sum(tune_periods.values())
-        tune_scheme_data.update({
-            "periods": tune_periods.copy(),
-            "base_total": tune_base_total,
-            "original_periods": tune_periods.copy(),
-            "original_base_total": tune_base_total
-        })
+# 强制同步原始锚点到微调数据
+if tune_original_periods and not tune_periods:
+    tune_scheme_data["periods"] = tune_original_periods.copy()
+    tune_scheme_data["base_total"] = tune_original_base_total
+    tune_periods = tune_scheme_data["periods"].copy()
+    tune_base_total = tune_scheme_data["base_total"]
 
-if not tune_periods:
-    st.warning("该方案暂无时段电量数据，请先生成/调整方案！")
+# 无数据提示（优先判断原始锚点）
+if not tune_original_periods:
+    st.warning("该方案暂无原始数据，请先点击「生成年度双方案」！")
+elif not tune_periods:
+    st.warning("该方案暂无调整后数据，请先执行「比例调整」！")
 else:
     if tune_base_total <= 0:
         st.warning("请先执行「比例调整」设置基准总量！")
@@ -1735,7 +1723,7 @@ else:
                         first_p = list(new_other_periods.keys())[0]
                         updated_periods[first_p] = round(updated_periods[first_p] + total_diff, 2)
                     
-                    # 更新Session State
+                    # 更新Session State（仅改当前数据，原始锚点不变）
                     tune_scheme_data["periods"] = updated_periods
                     # 同步到全局数据
                     if tune_scheme == "方案一" and tune_month in st.session_state.get("trade_power_typical", {}):
