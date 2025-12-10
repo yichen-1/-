@@ -1493,15 +1493,30 @@ st.divider()
 # 生成独立唯一前缀，避免Key冲突
 unique_prefix_ratio_tune = str(uuid.uuid4())[:8]
 
+# 月份切换时强制刷新的回调函数
+def on_month_change():
+    st.session_state[f"{unique_prefix_ratio_tune}_month_changed"] = True
+    st.rerun()
+
 # -------------------------- 功能1：月度方案整体比例调整（保持时段占比） --------------------------
 st.write("### 📊 月度方案总量比例调整（保持时段占比）")
 
-# 1. 选择调整参数
+# 1. 选择调整参数（添加月份切换回调）
 col_adjust_1, col_adjust_2, col_adjust_3 = st.columns([2, 2, 1.5])
 with col_adjust_1:
-    adjust_month = st.selectbox("选择调整月份", range(1, 13), key=f"{unique_prefix_ratio_tune}_ratio_month")
+    adjust_month = st.selectbox(
+        "选择调整月份", 
+        range(1, 13), 
+        key=f"{unique_prefix_ratio_tune}_ratio_month",
+        on_change=on_month_change  # 月份切换时触发刷新
+    )
 with col_adjust_2:
-    adjust_scheme = st.selectbox("选择调整方案", ["方案一", "方案二"], key=f"{unique_prefix_ratio_tune}_ratio_scheme")
+    adjust_scheme = st.selectbox(
+        "选择调整方案", 
+        ["方案一", "方案二"], 
+        key=f"{unique_prefix_ratio_tune}_ratio_scheme",
+        on_change=on_month_change  # 方案切换时触发刷新
+    )
 with col_adjust_3:
     adjust_ratio = st.number_input(
         "调整比例", 
@@ -1510,9 +1525,9 @@ with col_adjust_3:
         help="0.9=90%（缩量）、1.0=不变、1.1=110%（增量）"
     )
 
-# 2. 显示当前数据
+# 2. 显示当前数据（强制从session_state读取最新数据）
 current_scheme_data = st.session_state.scheme_power_data[adjust_month][adjust_scheme]
-current_periods = current_scheme_data["periods"]
+current_periods = current_scheme_data["periods"].copy()  # 强制复制避免引用问题
 current_base_total = current_scheme_data["base_total"]
 
 # 兼容现有方案数据（如果scheme_power_data为空，从trade_power_typical/arbitrage读取）
@@ -1551,7 +1566,7 @@ with col_ori_2:
     else:
         st.warning("该方案暂无时段电量数据，请先生成方案！")
 
-# 3. 执行比例调整
+# 3. 执行比例调整（添加刷新确保数据更新）
 if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{unique_prefix_ratio_tune}_ratio_execute"):
     if not current_periods:
         st.error("调整失败：无基础时段电量数据！")
@@ -1577,7 +1592,7 @@ if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{
         elif adjust_scheme == "方案二" and adjust_month in st.session_state.trade_power_arbitrage:
             st.session_state.trade_power_arbitrage[adjust_month]["方案二月度电量(MWh)"] = st.session_state.trade_power_arbitrage[adjust_month]["时段"].map(new_periods)
         
-        # 提示结果
+        # 提示结果并强制刷新
         st.success(f"""
             比例调整完成！
             基准总量：{original_base:.2f} → {new_base_total:.2f} MWh（比例：{adjust_ratio}）
@@ -1588,21 +1603,33 @@ if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{
             pd.DataFrame(list(new_periods.items()), columns=["时段", "电量(MWh)"]),
             hide_index=True, use_container_width=True
         )
+        # 强制刷新页面确保状态同步
+        st.rerun()
 
 # -------------------------- 功能2：分时段电量微调（自动分摊差额，总量锁定） --------------------------
 st.divider()
 st.write("### 🛠️ 分时段电量微调（总量锁定为基准值，差额自动分摊）")
 
-# 1. 选择微调参数
+# 1. 选择微调参数（添加月份切换回调）
 col_tune_1, col_tune_2 = st.columns([2, 2])
 with col_tune_1:
-    tune_month = st.selectbox("选择微调月份", range(1, 13), key=f"{unique_prefix_ratio_tune}_tune_month")
+    tune_month = st.selectbox(
+        "选择微调月份", 
+        range(1, 13), 
+        key=f"{unique_prefix_ratio_tune}_tune_month",
+        on_change=on_month_change  # 月份切换时触发刷新
+    )
 with col_tune_2:
-    tune_scheme = st.selectbox("选择微调方案", ["方案一", "方案二"], key=f"{unique_prefix_ratio_tune}_tune_scheme")
+    tune_scheme = st.selectbox(
+        "选择微调方案", 
+        ["方案一", "方案二"], 
+        key=f"{unique_prefix_ratio_tune}_tune_scheme",
+        on_change=on_month_change  # 方案切换时触发刷新
+    )
 
 # 获取微调数据（兼容现有方案数据）
 tune_scheme_data = st.session_state.scheme_power_data[tune_month][tune_scheme]
-tune_periods = tune_scheme_data["periods"]
+tune_periods = tune_scheme_data["periods"].copy()  # 强制复制避免引用问题
 tune_base_total = tune_scheme_data["base_total"]
 
 # 首次微调时，从现有方案数据初始化
