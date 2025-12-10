@@ -1113,7 +1113,7 @@ with col_data2:
                 except Exception as e:
                     st.error(f"❌ 生成方案失败：{str(e)}")
                     st.session_state.calculated = False
-                    
+
 # 3. 导出年度方案
 with col_data3:
     if st.session_state.calculated and st.session_state.trade_power_typical:
@@ -1577,37 +1577,33 @@ for field, default_val in required_fields.items():
     if field not in current_scheme:
         current_scheme[field] = default_val
 
-# 安全读取字段（不再报KeyError）
-current_periods = current_scheme["periods"].copy()
-current_base_total = current_scheme["base_total"]
-original_periods = current_scheme["original_periods"].copy()  # 仅读取生成方案时的原始锚点
+# 核心修复：移除提前复制的副本，改为动态读取current_scheme（确保显示最新值）
+original_periods = current_scheme["original_periods"].copy()  # 原始锚点仅读取一次
 original_base_total = current_scheme["original_base_total"]
 
-# 3. 核心修复：强制同步原始锚点到当前数据（仅当原始锚点有数据时）
-# 彻底移除动态读取trade_power_typical的逻辑，仅依赖生成方案时的original_periods
-if original_periods and not current_periods:
+# 3. 强制同步原始锚点到当前数据（仅当原始锚点有数据时）
+if original_periods and not current_scheme["periods"]:
     current_scheme["periods"] = original_periods.copy()
     current_scheme["base_total"] = original_base_total
-    current_periods = current_scheme["periods"].copy()
-    current_base_total = current_scheme["base_total"]
 
-current_actual_total = sum(current_periods.values()) if current_periods else 0.0
+# 动态计算当前实际总量（实时读取current_scheme的最新periods）
+current_actual_total = sum(current_scheme["periods"].values()) if current_scheme["periods"] else 0.0
 
-# 4. 显示当前数据（优先展示原始锚点数据）
+# 4. 显示当前数据（动态读取current_scheme的最新值）
 col_ori_1, col_ori_2 = st.columns(2)
 with col_ori_1:
     st.write(f"**{adjust_month}月-{adjust_scheme}**")
     st.write(f"原始基准总量（生成方案锚点）：{original_base_total:.2f} MWh")
-    st.write(f"当前基准总量（调整后）：{current_base_total:.2f} MWh")
+    st.write(f"当前基准总量（调整后）：{current_scheme['base_total']:.2f} MWh")  # 动态读取最新base_total
     st.write(f"当前实际总量：{current_actual_total:.2f} MWh")
 with col_ori_2:
     # 优先判断原始锚点，无锚点才提示生成方案
     if not original_periods:
         st.warning("该方案暂无原始数据，请先点击「生成年度双方案」！")
-    elif current_periods:
+    elif current_scheme["periods"]:
         st.write("当前时段电量分布：")
         st.dataframe(
-            pd.DataFrame(list(current_periods.items()), columns=["时段", "电量(MWh)"]),
+            pd.DataFrame(list(current_scheme["periods"].items()), columns=["时段", "电量(MWh)"]),  # 动态读取最新periods
             hide_index=True, use_container_width=True
         )
     else:
@@ -1629,7 +1625,7 @@ if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{
             for period, power in original_periods.items()
         }
         
-        # 更新当前数据（原始锚点永不修改）
+        # 更新current_scheme的最新值（覆盖旧数据）
         current_scheme["periods"] = new_periods
         current_scheme["base_total"] = new_base_total
         
@@ -1638,6 +1634,9 @@ if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{
             st.session_state.trade_power_typical[adjust_month]["方案一月度电量(MWh)"] = st.session_state.trade_power_typical[adjust_month]["时段"].map(new_periods)
         elif adjust_scheme == "方案二" and adjust_month in st.session_state.get("trade_power_arbitrage", {}):
             st.session_state.trade_power_arbitrage[adjust_month]["方案二月度电量(MWh)"] = st.session_state.trade_power_arbitrage[adjust_month]["时段"].map(new_periods)
+        
+        # 强制页面刷新（确保显示最新数据）
+        st.rerun()
         
         st.success(f"""
             比例调整完成！
