@@ -828,25 +828,51 @@ with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
         # 实时同步到session state
         st.session_state.manual_market_hours_monthly[selected_month] = manual_hours
 
-    # -------------------------- 原有：分月-限电率（保持不变） --------------------------
-    st.write(f"##### {selected_month}月 · 限电率")
-    limit_rate = st.number_input(
-        "限电率(%)", min_value=0.0, max_value=100.0,
-        value=current_params["power_limit_rate"], step=0.1,
-        key=f"limit_rate_{selected_month}"
-    )
-    # 分月-限电率（保持不变）
-    st.write(f"##### {selected_month}月 · 限电率")
-    limit_rate = st.number_input(
-        "限电率(%)", min_value=0.0, max_value=100.0,
-        value=current_params["power_limit_rate"], step=0.1,
-        key=f"limit_rate_{selected_month}"
+    # 分月-机制电量数值输入框（原key）
+    mech_val = st.number_input(
+        "数值", min_value=0.0, max_value=m_max,
+        value=current_params["mechanism_value"], step=0.1,
+        key=f"mech_val_{selected_month}"  # 修改为：
+        # key=f"param_mech_val_{selected_month}_unique"
     )
 
+    # 分月-保障性电量数值输入框（原key）
+    gua_val = st.number_input(
+        "数值", min_value=0.0, max_value=g_max,
+        value=current_params["guaranteed_value"], step=0.1,
+        key=f"gua_val_{selected_month}"  # 修改为：
+        # key=f"param_gua_val_{selected_month}_unique"
+    )
+
+    # 分月-机制电价输入框（原key）
+    mech_price = st.number_input(
+        "机制电价（元/MWh）", min_value=0.0,
+        value=current_params["mechanism_price"], step=0.1,
+        key=f"mech_price_{selected_month}"  # 修改为：
+        # key=f"param_mech_price_{selected_month}_unique"
+    )
+
+    # 分月-保障性电价输入框（原key）
+    gua_price = st.number_input(
+        "保障性电价（元/MWh）", min_value=0.0,
+        value=current_params["guaranteed_price"], step=0.1,
+        key=f"gua_price_{selected_month}"  # 修改为：
+        # key=f"param_gua_price_{selected_month}_unique"
+    )
+
+    # 分月-手动市场化小时数输入框（新增的）
+    manual_hours = st.number_input(
+        "市场化小时数（自动校验不超过可用小时数）", 
+        min_value=0.0,
+        value=current_manual_hours, 
+        step=0.1,
+        key=f"manual_market_hours_{selected_month}"  # 修改为：
+        # key=f"param_manual_hours_{selected_month}_unique"
+    )
     # -------------------------- 原有：保存按钮（新增批量同步逻辑可选） --------------------------
     col_save, col_empty = st.columns([1, 5])
     with col_save:
-        if st.button(f"💾 保存{selected_month}月参数", key=f"save_{selected_month}_param", type="primary"):
+        if st.button(f"💾 保存{selected_month}月参数", key=f"param_save_{selected_month}_unique", type="primary"):
             # 原有保存逻辑保持不变...
             st.session_state.monthly_params[selected_month] = {
                 "mechanism_mode": mech_mode,
