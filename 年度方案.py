@@ -1,4 +1,5 @@
-import streamlit as st
+
+import uuid  # 新增：生成唯一标识import streamlit as st
 import pandas as pd
 import numpy as np
 import os
@@ -756,124 +757,94 @@ if st.button("📌 一键应用到所有月份", type="primary", key="batch_appl
         }
     st.success("✅ 已将当前参数（含电价）同步到所有月份！")
 
-# 2. 分月参数调整（单独修改）- 点击保存才更新，不实时同步
+# 先在分月调整Expander内部、selected_month定义后生成唯一前缀（核心）
 with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
-    # 选择要修改的月份（保持不变）
-    selected_month = st.selectbox("选择要修改的月份", range(1, 13), key="month_param_sel")
-    current_params = st.session_state.monthly_params[selected_month]  # 仅加载当前参数
-    
-    # 分月-机制电量（保持不变）
+    # 生成8位唯一前缀，彻底避免Key重复
+    unique_prefix = str(uuid.uuid4())[:8]
+    selected_month = st.selectbox("选择要修改的月份", range(1, 13), key=f"{unique_prefix}_month_param_sel")
+    current_params = st.session_state.monthly_params[selected_month]
+
+    # 分月-机制电量（修复Key+删除重复定义）
     st.write(f"##### {selected_month}月 · 机制电量")
     col_m1, col_m2 = st.columns([2, 1])
     with col_m1:
         mech_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["mechanism_mode"] == "小时数" else 1,
-            key=f"mech_mode_{selected_month}"
+            key=f"{unique_prefix}_mech_mode_{selected_month}"  # 唯一Key
         )
     with col_m2:
         m_max = 100.0 if mech_mode == "比例(%)" else 1000000.0
         mech_val = st.number_input(
             "数值", min_value=0.0, max_value=m_max,
             value=current_params["mechanism_value"], step=0.1,
-            key=f"mech_val_{selected_month}"
+            key=f"{unique_prefix}_mech_val_{selected_month}"  # 唯一Key
         )
 
-    # 分月-保障性电量（保持不变）
+    # 分月-保障性电量（修复Key+删除重复定义）
     st.write(f"##### {selected_month}月 · 保障性电量")
     col_g1, col_g2 = st.columns([2, 1])
     with col_g1:
         gua_mode = st.selectbox(
             "输入模式", ["小时数", "比例(%)"],
             index=0 if current_params["guaranteed_mode"] == "小时数" else 1,
-            key=f"gua_mode_{selected_month}"
+            key=f"{unique_prefix}_gua_mode_{selected_month}"  # 唯一Key
         )
     with col_g2:
         g_max = 100.0 if gua_mode == "比例(%)" else 1000000.0
         gua_val = st.number_input(
             "数值", min_value=0.0, max_value=g_max,
             value=current_params["guaranteed_value"], step=0.1,
-            key=f"gua_val_{selected_month}"
+            key=f"{unique_prefix}_gua_val_{selected_month}"  # 唯一Key
         )
 
-    # -------------------------- 新增：分月-机制电价（插入这里）--------------------------
+    # 分月-机制电价（修复Key+删除重复定义）
     st.write(f"##### {selected_month}月 · 机制电价")
     mech_price = st.number_input(
         "机制电价（元/MWh）", min_value=0.0,
         value=current_params["mechanism_price"], step=0.1,
-        key=f"mech_price_{selected_month}"
+        key=f"{unique_prefix}_mech_price_{selected_month}"  # 唯一Key
     )
 
-    # -------------------------- 新增：分月-保障性电价（插入这里）--------------------------
+    # 分月-保障性电价（修复Key+删除重复定义）
     st.write(f"##### {selected_month}月 · 保障性电价")
     gua_price = st.number_input(
         "保障性电价（元/MWh）", min_value=0.0,
         value=current_params["guaranteed_price"], step=0.1,
-        key=f"gua_price_{selected_month}"
+        key=f"{unique_prefix}_gua_price_{selected_month}"  # 唯一Key
     )
-    # -------------------------- 新增：分月-手动市场化小时数（仅手动模式显示） --------------------------
+
+    # 分月-限电率（补充完整，你原代码漏了这部分定义）
+    st.write(f"##### {selected_month}月 · 限电率")
+    limit_rate = st.number_input(
+        "限电率(%)", min_value=0.0, max_value=100.0,
+        value=current_params["power_limit_rate"], step=0.1,
+        key=f"{unique_prefix}_limit_rate_{selected_month}"  # 唯一Key
+    )
+
+    # 新增：分月-手动市场化小时数（仅手动模式显示，修复语法错误）
     if not st.session_state.auto_calculate:
         st.write(f"##### {selected_month}月 · 手动市场化小时数")
-        # 读取当前月份的手动小时数（无则默认0）
         current_manual_hours = st.session_state.manual_market_hours_monthly.get(selected_month, 0.0)
-        # 输入框（带发电能力提示）
         manual_hours = st.number_input(
             "市场化小时数（自动校验不超过可用小时数）", 
             min_value=0.0,
             value=current_manual_hours, 
             step=0.1,
-            key=f"manual_market_hours_{selected_month}",
+            key=f"{unique_prefix}_manual_market_hours_{selected_month}",  # 唯一Key+修复语法
             help="手动设置的小时数不能超过扣除限电/机制/保障性电量后的可用小时数"
         )
-        # 实时同步到session state
         st.session_state.manual_market_hours_monthly[selected_month] = manual_hours
 
-    # 分月-机制电量数值输入框（原key）
-    mech_val = st.number_input(
-        "数值", min_value=0.0, max_value=m_max,
-        value=current_params["mechanism_value"], step=0.1,
-        key=f"mech_val_{selected_month}"  # 修改为：
-        # key=f"param_mech_val_{selected_month}_unique"
-    )
-
-    # 分月-保障性电量数值输入框（原key）
-    gua_val = st.number_input(
-        "数值", min_value=0.0, max_value=g_max,
-        value=current_params["guaranteed_value"], step=0.1,
-        key=f"gua_val_{selected_month}"  # 修改为：
-        # key=f"param_gua_val_{selected_month}_unique"
-    )
-
-    # 分月-机制电价输入框（原key）
-    mech_price = st.number_input(
-        "机制电价（元/MWh）", min_value=0.0,
-        value=current_params["mechanism_price"], step=0.1,
-        key=f"mech_price_{selected_month}"  # 修改为：
-        # key=f"param_mech_price_{selected_month}_unique"
-    )
-
-    # 分月-保障性电价输入框（原key）
-    gua_price = st.number_input(
-        "保障性电价（元/MWh）", min_value=0.0,
-        value=current_params["guaranteed_price"], step=0.1,
-        key=f"gua_price_{selected_month}"  # 修改为：
-        # key=f"param_gua_price_{selected_month}_unique"
-    )
-
-    # 分月-手动市场化小时数输入框（新增的）
-    manual_hours = st.number_input(
-        "市场化小时数（自动校验不超过可用小时数）", 
-        min_value=0.0,
-        value=current_manual_hours, 
-        step=0.1,
-        key=f"manual_market_hours_{selected_month}"  # 修改为：
-        # key=f"param_manual_hours_{selected_month}_unique"
-    )
-    # -------------------------- 原有：保存按钮（新增批量同步逻辑可选） --------------------------
+    # 保存按钮（唯一Key）
     col_save, col_empty = st.columns([1, 5])
     with col_save:
-        if st.button(f"💾 保存{selected_month}月参数", key=f"param_save_{selected_month}_unique", type="primary"):
-            # 原有保存逻辑保持不变...
+        if st.button(
+            f"💾 保存{selected_month}月参数", 
+            key=f"{unique_prefix}_save_{selected_month}_param",  # 唯一Key
+            type="primary"
+        ):
+            # 保存逻辑（补充manual_hours不影响保存，仅市场化小时数用）
             st.session_state.monthly_params[selected_month] = {
                 "mechanism_mode": mech_mode,
                 "mechanism_value": mech_val,
@@ -883,26 +854,28 @@ with st.expander("🔧 分月参数调整（单独修改）", expanded=False):
                 "mechanism_price": mech_price,
                 "guaranteed_price": gua_price
             }
-            # 可选：保存时提示当前月份的可用小时数（帮助用户判断手动值是否合理）
-            # 计算当前月份可用小时数（预览）
+            # 可选：提示可用小时数
             if st.session_state.installed_capacity > 0 and selected_month in st.session_state.monthly_data:
                 temp_gen_hours, temp_available_hours = calculate_core_params_monthly(selected_month, st.session_state.installed_capacity)
                 st.info(f"💡 该月份可用小时数上限：{temp_available_hours:.2f}")
             st.success(f"✅ 已保存{selected_month}月的参数（含电价）！")
             st.rerun()
 
-    # 所有月份参数预览表格（新增电价列，保持不变）
+    # 所有月份参数预览表格（修复格式+新增列）
     st.divider()
     st.write("#### 所有月份参数预览（含电价）")
-    param_preview.append({
-        "月份": f"{month}月",
-        "机制电量": f"{p['mechanism_mode']} · {p['mechanism_value']:.2f}",
-        "保障性电量": f"{p['guaranteed_mode']} · {p['guaranteed_value']:.2f}",
-        "机制电价(元/MWh)": f"{p['mechanism_price']:.2f}",
-        "保障性电价(元/MWh)": f"{p['guaranteed_price']:.2f}",
-        "限电率": f"{p['power_limit_rate']:.2f}%",
-        "手动市场化小时数": f"{st.session_state.manual_market_hours_monthly.get(month, 0.0):.2f}"  # 新增列
-    })
+    param_preview = []  # 初始化列表（避免重复追加）
+    for month in range(1, 13):
+        p = st.session_state.monthly_params[month]
+        param_preview.append({
+            "月份": f"{month}月",
+            "机制电量": f"{p['mechanism_mode']} · {p['mechanism_value']:.2f}",
+            "保障性电量": f"{p['guaranteed_mode']} · {p['guaranteed_value']:.2f}",
+            "机制电价(元/MWh)": f"{p['mechanism_price']:.2f}",
+            "保障性电价(元/MWh)": f"{p['guaranteed_price']:.2f}",
+            "限电率": f"{p['power_limit_rate']:.2f}%",
+            "手动市场化小时数": f"{st.session_state.manual_market_hours_monthly.get(month, 0.0):.2f}"
+        })
     preview_df = pd.DataFrame(param_preview)
     st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
