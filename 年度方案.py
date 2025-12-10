@@ -1012,7 +1012,7 @@ with col_data1:
                 st.session_state.monthly_data[month] = init_month_template(month)
             st.success(f"✅ 已初始化{len(st.session_state.selected_months)}个月份模板")
 
-# 2. 生成年度双方案（重点修复：严格过滤无效数据）
+# 2. 生成年度双方案（重点修复：严格过滤无效数据 + 写入原始锚点）
 with col_data2:
     if st.button("📝 生成年度双方案", use_container_width=True, type="primary", key="generate_annual_plan"):
         if not st.session_state.selected_months or not st.session_state.monthly_data:
@@ -1034,9 +1034,9 @@ with col_data2:
                         if st.session_state.auto_calculate:
                             gh, mh = calculate_core_params_monthly(month, st.session_state.installed_capacity)
                         else:
-                            # 手动模式：发电小时数按分月参数计算，市场化小时数用手动输入
+                            # 修复：手动模式下读取分月手动小时数（原错误读取全局manual_market_hours）
                             gh, _ = calculate_core_params_monthly(month, st.session_state.installed_capacity)
-                            mh = st.session_state.manual_market_hours
+                            mh = st.session_state.manual_market_hours_monthly[month]
                         
                         # 校验市场化小时数有效性
                         if mh <= 0:
@@ -1058,6 +1058,33 @@ with col_data2:
                             st.error(f"❌ 月份{month}方案二计算失败，跳过该月份")
                             continue
                         
+                        # ########################### 核心修复：写入原始锚点数据 ###########################
+                        # 初始化当前月份的scheme_power_data结构
+                        if month not in st.session_state.scheme_power_data:
+                            st.session_state.scheme_power_data[month] = {
+                                "方案一": {"periods": {}, "base_total": 0.0, "original_periods": {}, "original_base_total": 0.0},
+                                "方案二": {"periods": {}, "base_total": 0.0, "original_periods": {}, "original_base_total": 0.0}
+                            }
+                        
+                        # 方案一：写入原始锚点（生成方案时的原始数据，永不修改）
+                        scheme1_original = typical_df.set_index("时段")["方案一月度电量(MWh)"].to_dict()
+                        st.session_state.scheme_power_data[month]["方案一"].update({
+                            "original_periods": scheme1_original,  # 原始时段电量（锚点）
+                            "original_base_total": total_typical,  # 原始总量（锚点）
+                            "periods": scheme1_original.copy(),     # 初始当前数据=原始数据
+                            "base_total": total_typical            # 初始基准总量=原始总量
+                        })
+                        
+                        # 方案二：写入原始锚点
+                        scheme2_original = arbitrage_df.set_index("时段")["方案二月度电量(MWh)"].to_dict()
+                        st.session_state.scheme_power_data[month]["方案二"].update({
+                            "original_periods": scheme2_original,  # 原始时段电量（锚点）
+                            "original_base_total": total_typical,  # 原始总量（锚点，和方案一一致）
+                            "periods": scheme2_original.copy(),     # 初始当前数据=原始数据
+                            "base_total": total_typical            # 初始基准总量=原始总量
+                        })
+                        # ###########################################################################
+                        
                         # 只有两个方案都成功才存入会话状态
                         trade_typical[month] = typical_df
                         trade_arbitrage[month] = arbitrage_df
@@ -1076,7 +1103,8 @@ with col_data2:
                         st.success(
                             f"✅ 年度双方案生成成功！\n"
                             f"成功计算月份：{', '.join([f'{m}月' for m in valid_calculated_months])}\n"
-                            f"年度总交易电量：{round(total_annual, 2)} MWh"
+                            f"年度总交易电量：{round(total_annual, 2)} MWh\n"
+                            f"✅ 原始锚点数据已写入，可进行比例调整/分时段微调！"
                         )
                     else:
                         st.error("❌ 所有选中月份的方案计算均失败，请检查基础数据和参数配置！")
@@ -1085,7 +1113,7 @@ with col_data2:
                 except Exception as e:
                     st.error(f"❌ 生成方案失败：{str(e)}")
                     st.session_state.calculated = False
-
+                    
 # 3. 导出年度方案
 with col_data3:
     if st.session_state.calculated and st.session_state.trade_power_typical:
