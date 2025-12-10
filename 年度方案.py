@@ -41,6 +41,15 @@ if "installed_capacity" not in st.session_state:
     st.session_state.installed_capacity = 0.0  # 装机容量（MW）
 if "monthly_data" not in st.session_state:
     st.session_state.monthly_data = {}  # 分月基础数据存储
+# 新增：方案电量+基准总量存储（核心，保证数据联动）
+if "scheme_power_data" not in st.session_state:
+    # 结构：{月份: {"方案一": {"periods": {时段: 电量}, "base_total": 总量}, "方案二": {...}}}
+    st.session_state.scheme_power_data = {
+        month: {
+            "方案一": {"periods": {}, "base_total": 0.0},  # periods=时段电量, base_total=比例调整后的基准总量
+            "方案二": {"periods": {}, "base_total": 0.0}
+        } for month in range(1, 13)
+    }
 
 # -------------------------- 必备：区域-省份映射字典（合并去重，保留详细版本） --------------------------
 REGIONS = {
@@ -1479,205 +1488,217 @@ else:
     if st.session_state.calculated and not st.session_state.trade_power_typical:
         st.warning("⚠️ 无有效方案数据，请重新生成方案")
 
-# -------------------------- 方案电量手动调增调减（多时段+非实时同步） --------------------------
+# -------------------------- 新增：第二步+第三步（比例调整+分时段微调） --------------------------
 st.divider()
-st.header("✏️ 方案电量手动调增调减（总量保持不变）")
+# 生成独立唯一前缀，避免Key冲突
+unique_prefix_ratio_tune = str(uuid.uuid4())[:8]
 
-# 初始化临时调整数据（按“月份+方案”区分，仅存储已应用/原始数据）
-if "temp_adjust_data" not in st.session_state:
-    st.session_state.temp_adjust_data = {}  # 结构：{("月份", "方案"): 已应用/原始DataFrame}
-if "original_adjust_data" not in st.session_state:
-    st.session_state.original_adjust_data = {}  # 存储原始数据，用于重置
+# -------------------------- 功能1：月度方案整体比例调整（保持时段占比） --------------------------
+st.write("### 📊 月度方案总量比例调整（保持时段占比）")
 
-if st.session_state.calculated and st.session_state.trade_power_typical:
-    # 过滤有效调整月份
-    valid_adjust_months = [
-        month for month in st.session_state.selected_months
-        if month in st.session_state.trade_power_typical
-        and month in st.session_state.trade_power_arbitrage
-        and not st.session_state.trade_power_typical[month].empty
-        and not st.session_state.trade_power_arbitrage[month].empty
-        and "方案一月度电量(MWh)" in st.session_state.trade_power_typical[month].columns
-        and "方案二月度电量(MWh)" in st.session_state.trade_power_arbitrage[month].columns
-    ]
-    
-    if not valid_adjust_months:
-        st.warning("⚠️ 无有效方案数据可调整，请重新生成方案")
+# 1. 选择调整参数
+col_adjust_1, col_adjust_2, col_adjust_3 = st.columns([2, 2, 1.5])
+with col_adjust_1:
+    adjust_month = st.selectbox("选择调整月份", range(1, 13), key=f"{unique_prefix_ratio_tune}_ratio_month")
+with col_adjust_2:
+    adjust_scheme = st.selectbox("选择调整方案", ["方案一", "方案二"], key=f"{unique_prefix_ratio_tune}_ratio_scheme")
+with col_adjust_3:
+    adjust_ratio = st.number_input(
+        "调整比例", 
+        min_value=0.1, max_value=2.0, value=1.0, step=0.01,
+        key=f"{unique_prefix_ratio_tune}_ratio_value",
+        help="0.9=90%（缩量）、1.0=不变、1.1=110%（增量）"
+    )
+
+# 2. 显示当前数据
+current_scheme_data = st.session_state.scheme_power_data[adjust_month][adjust_scheme]
+current_periods = current_scheme_data["periods"]
+current_base_total = current_scheme_data["base_total"]
+
+# 兼容现有方案数据（如果scheme_power_data为空，从trade_power_typical/arbitrage读取）
+if not current_periods and st.session_state.calculated:
+    if adjust_scheme == "方案一" and adjust_month in st.session_state.trade_power_typical:
+        current_periods = st.session_state.trade_power_typical[adjust_month].set_index("时段")["方案一月度电量(MWh)"].to_dict()
+        current_base_total = sum(current_periods.values())
+        # 同步到scheme_power_data（首次初始化）
+        st.session_state.scheme_power_data[adjust_month][adjust_scheme] = {
+            "periods": current_periods,
+            "base_total": current_base_total
+        }
+    elif adjust_scheme == "方案二" and adjust_month in st.session_state.trade_power_arbitrage:
+        current_periods = st.session_state.trade_power_arbitrage[adjust_month].set_index("时段")["方案二月度电量(MWh)"].to_dict()
+        current_base_total = sum(current_periods.values())
+        # 同步到scheme_power_data（首次初始化）
+        st.session_state.scheme_power_data[adjust_month][adjust_scheme] = {
+            "periods": current_periods,
+            "base_total": current_base_total
+        }
+
+current_actual_total = sum(current_periods.values()) if current_periods else 0.0
+
+col_ori_1, col_ori_2 = st.columns(2)
+with col_ori_1:
+    st.write(f"**{adjust_month}月-{adjust_scheme}**")
+    st.write(f"当前基准总量：{current_base_total:.2f} MWh")
+    st.write(f"当前实际总量：{current_actual_total:.2f} MWh")
+with col_ori_2:
+    if current_periods:
+        st.write("当前时段电量分布：")
+        st.dataframe(
+            pd.DataFrame(list(current_periods.items()), columns=["时段", "电量(MWh)"]),
+            hide_index=True, use_container_width=True
+        )
     else:
-        # 1. 选择调整的月份和方案
-        col_adj1, col_adj2 = st.columns(2)
-        with col_adj1:
-            adj_month = st.selectbox(
-                "选择要调整的月份",
-                valid_adjust_months,
-                key="adj_month_select"
-            )
-        with col_adj2:
-            adj_scheme = st.selectbox(
-                "选择要调整的方案",
-                ["方案一（典型曲线）", "方案二（套利/直线曲线）"],
-                key="adj_scheme_select"
-            )
+        st.warning("该方案暂无时段电量数据，请先生成方案！")
 
-        # 2. 获取对应方案的原始数据（绑定到“月份+方案”唯一键）
-        data_key = (adj_month, adj_scheme)
-        if adj_scheme == "方案一（典型曲线）":
-            scheme_final_df = st.session_state.trade_power_typical.get(adj_month, None)
-            scheme_col = "方案一月度电量(MWh)"
-        else:
-            scheme_final_df = st.session_state.trade_power_arbitrage.get(adj_month, None)
-            scheme_col = "方案二月度电量(MWh)"
-        base_df = st.session_state.monthly_data.get(adj_month, None)
+# 3. 执行比例调整
+if st.button(f"✅ 执行{adjust_month}月-{adjust_scheme}比例调整", key=f"{unique_prefix_ratio_tune}_ratio_execute"):
+    if not current_periods:
+        st.error("调整失败：无基础时段电量数据！")
+    else:
+        # 步骤1：计算新基准总量（原基准总量×比例，无基准则用实际总量）
+        original_base = current_base_total if current_base_total > 0 else current_actual_total
+        new_base_total = round(original_base * adjust_ratio, 2)
+        
+        # 步骤2：按比例缩放各时段电量（保持占比）
+        new_periods = {
+            period: round(power * adjust_ratio, 2)
+            for period, power in current_periods.items()
+        }
+        
+        # 步骤3：更新Session State（同时同步到trade_power_typical/arbitrage，保证数据联动）
+        st.session_state.scheme_power_data[adjust_month][adjust_scheme] = {
+            "periods": new_periods,
+            "base_total": new_base_total
+        }
+        # 同步到现有方案数据（保证其他模块能读取到调整后的数据）
+        if adjust_scheme == "方案一" and adjust_month in st.session_state.trade_power_typical:
+            st.session_state.trade_power_typical[adjust_month]["方案一月度电量(MWh)"] = st.session_state.trade_power_typical[adjust_month]["时段"].map(new_periods)
+        elif adjust_scheme == "方案二" and adjust_month in st.session_state.trade_power_arbitrage:
+            st.session_state.trade_power_arbitrage[adjust_month]["方案二月度电量(MWh)"] = st.session_state.trade_power_arbitrage[adjust_month]["时段"].map(new_periods)
+        
+        # 提示结果
+        st.success(f"""
+            比例调整完成！
+            基准总量：{original_base:.2f} → {new_base_total:.2f} MWh（比例：{adjust_ratio}）
+            各时段电量已按比例缩放，占比保持不变
+        """)
+        st.write("调整后时段电量：")
+        st.dataframe(
+            pd.DataFrame(list(new_periods.items()), columns=["时段", "电量(MWh)"]),
+            hide_index=True, use_container_width=True
+        )
 
-        if scheme_final_df is None or scheme_final_df.empty or base_df is None or base_df.empty:
-            st.warning("⚠️ 该月份方案数据缺失，请重新生成方案")
-        else:
-            avg_gen_list = base_df["平均发电量(MWh)"].tolist()
-            avg_gen_total = sum(avg_gen_list)
-            
-            if avg_gen_total <= 0:
-                st.error("❌ 该月份原始平均发电量总和为0，无法按权重分摊调整量")
-            else:
-                # 3. 初始化临时数据和原始数据（仅切换月份/方案时同步，不实时更新）
-                if data_key not in st.session_state.original_adjust_data:
-                    # 保存原始数据（用于重置，仅初始化1次）
-                    st.session_state.original_adjust_data[data_key] = scheme_final_df.copy()
-                    # 初始化临时数据为原始数据（未应用任何修改时）
-                    st.session_state.temp_adjust_data[data_key] = scheme_final_df.copy()
-                
-                # 当前显示的临时数据（仅从session_state读取，不实时写入）
-                temp_df = st.session_state.temp_adjust_data[data_key].copy()
-                # 原始数据（用于对比修改和重置）
-                original_df = st.session_state.original_adjust_data[data_key].copy()
-                total_fixed = original_df[scheme_col].sum()  # 总量固定（以原始总量为准）
+# -------------------------- 功能2：分时段电量微调（自动分摊差额，总量锁定） --------------------------
+st.divider()
+st.write("### 🛠️ 分时段电量微调（总量锁定为基准值，差额自动分摊）")
 
-                # 4. 显示可编辑表格（编辑时仅在内存中修改，不实时同步到session_state）
-                st.write(f"### {adj_scheme} - {adj_month}月电量调整（固定总量：{total_fixed:.2f} MWh）")
-                st.caption(
-                    "📌 支持多时段修改：可同时编辑任意多个时段 → 点击「应用调整」生效（刷新页面仅保留已应用数据）"
-                )
-                edit_temp_df = st.data_editor(
-                    temp_df[["时段", "平均发电量(MWh)", "时段比重(%)", scheme_col]],
-                    column_config={
-                        "时段": st.column_config.NumberColumn("时段", disabled=True),
-                        "平均发电量(MWh)": st.column_config.NumberColumn("原始平均发电量(MWh)", disabled=True),
-                        "时段比重(%)": st.column_config.NumberColumn("时段比重(%)", disabled=True),
-                        scheme_col: st.column_config.NumberColumn(
-                            f"{scheme_col}（可编辑）",
-                            min_value=0.0,
-                            step=0.1,
-                            format="%.2f",
-                            help="可同时修改多个时段，点击「应用调整」后未修改时段自动分摊调整量"
-                        )
-                    },
-                    use_container_width=True,
-                    num_rows="fixed",
-                    key=f"edit_adjust_scheme_{data_key}"
-                )
+# 1. 选择微调参数
+col_tune_1, col_tune_2 = st.columns([2, 2])
+with col_tune_1:
+    tune_month = st.selectbox("选择微调月份", range(1, 13), key=f"{unique_prefix_ratio_tune}_tune_month")
+with col_tune_2:
+    tune_scheme = st.selectbox("选择微调方案", ["方案一", "方案二"], key=f"{unique_prefix_ratio_tune}_tune_scheme")
 
-                # 5. 应用+重置按钮（并排布局）
-                col_apply, col_reset, col_empty = st.columns([1, 1, 8])
-                with col_apply:
-                    apply_adjust = st.button("应用调整", key=f"apply_adjust_{data_key}", type="primary")
-                with col_reset:
-                    reset_adjust = st.button("重置调整", key=f"reset_adjust_{data_key}")
+# 获取微调数据（兼容现有方案数据）
+tune_scheme_data = st.session_state.scheme_power_data[tune_month][tune_scheme]
+tune_periods = tune_scheme_data["periods"]
+tune_base_total = tune_scheme_data["base_total"]
 
-                # 6. 重置按钮逻辑（恢复到原始数据，不保留未应用修改）
-                if reset_adjust:
-                    st.session_state.temp_adjust_data[data_key] = original_df.copy()
-                    st.success(f"✅ 已重置为{adj_month}月{adj_scheme}原始数据！（未应用的修改已丢弃）")
-                    st.rerun()
+# 首次微调时，从现有方案数据初始化
+if not tune_periods and st.session_state.calculated:
+    if tune_scheme == "方案一" and tune_month in st.session_state.trade_power_typical:
+        tune_periods = st.session_state.trade_power_typical[tune_month].set_index("时段")["方案一月度电量(MWh)"].to_dict()
+        tune_base_total = sum(tune_periods.values())
+        st.session_state.scheme_power_data[tune_month][tune_scheme] = {
+            "periods": tune_periods,
+            "base_total": tune_base_total
+        }
+    elif tune_scheme == "方案二" and tune_month in st.session_state.trade_power_arbitrage:
+        tune_periods = st.session_state.trade_power_arbitrage[tune_month].set_index("时段")["方案二月度电量(MWh)"].to_dict()
+        tune_base_total = sum(tune_periods.values())
+        st.session_state.scheme_power_data[tune_month][tune_scheme] = {
+            "periods": tune_periods,
+            "base_total": tune_base_total
+        }
 
-                # 7. 应用按钮逻辑（仅点击时同步数据，刷新页面后保留）
-                if apply_adjust:
-                    # 检测是否有修改
-                    if edit_temp_df[scheme_col].equals(original_df[scheme_col]):
-                        st.info("ℹ️ 未检测到任何修改，无需应用！")
-                    else:
-                        # 步骤1：识别修改时段和未修改时段
-                        delta_series = edit_temp_df[scheme_col] - original_df[scheme_col]
-                        modified_indices = delta_series[delta_series != 0].index.tolist()
-                        unmodified_indices = [idx for idx in range(24) if idx not in modified_indices]
-
-                        # 步骤2：计算总调整量
-                        total_delta = delta_series.sum()
-
-                        # 步骤3：边界处理1：所有时段都修改
-                        if len(unmodified_indices) == 0:
-                            modified_total = edit_temp_df[scheme_col].sum()
-                            if np.isclose(modified_total, total_fixed, atol=0.01):
-                                adjusted_df = edit_temp_df.copy()
-                                adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
-                                st.success(
-                                    f"✅ 调整成功！\n"
-                                    f"- 修改时段数量：{len(modified_indices)}个（所有时段均修改）\n"
-                                    f"- 总电量保持：{total_fixed:.2f} MWh"
-                                )
-                            else:
-                                correction = total_fixed - modified_total
-                                last_mod_idx = modified_indices[-1]
-                                adjusted_df = edit_temp_df.copy()
-                                adjusted_df.loc[last_mod_idx, scheme_col] = max(
-                                    round(adjusted_df.loc[last_mod_idx, scheme_col] + correction, 2),
-                                    0.0
-                                )
-                                adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
-                                st.success(
-                                    f"✅ 调整成功（已自动修正总量）！\n"
-                                    f"- 修改时段数量：{len(modified_indices)}个（所有时段均修改）\n"
-                                    f"- 修正量：{correction:.2f} MWh（最后修改时段）\n"
-                                    f"- 总电量保持：{total_fixed:.2f} MWh"
-                                )
-
-                        # 步骤4：边界处理2：未修改时段无发电量
-                        else:
-                            unmodified_avg_gen = [avg_gen_list[idx] for idx in unmodified_indices]
-                            unmodified_avg_total = sum(unmodified_avg_gen)
-                            
-                            if unmodified_avg_total <= 0:
-                                st.error("❌ 未修改时段的原始平均发电量总和为0，无法分摊调整量！请至少保留1个有发电量的时段不修改")
-                            else:
-                                # 步骤5：未修改时段分摊总调整量（仅unmodified_avg_total>0时执行）
-                                adjusted_df = edit_temp_df.copy()
-                                for idx in unmodified_indices:
-                                    weight_ratio = avg_gen_list[idx] / unmodified_avg_total
-                                    share_amount = -total_delta * weight_ratio
-                                    new_val = adjusted_df.loc[idx, scheme_col] + share_amount
-                                    adjusted_df.loc[idx, scheme_col] = max(round(new_val, 2), 0.0)
-
-                                # 步骤6：修正浮点数误差
-                                current_total = adjusted_df[scheme_col].sum()
-                                if not np.isclose(current_total, total_fixed, atol=0.01):
-                                    last_unmod_idx = unmodified_indices[-1]
-                                    correction = total_fixed - current_total
-                                    adjusted_df.loc[last_unmod_idx, scheme_col] = max(
-                                        round(adjusted_df.loc[last_unmod_idx, scheme_col] + correction, 2),
-                                        0.0
-                                    )
-
-                                # 步骤7：更新时段比重
-                                adjusted_df["时段比重(%)"] = round(adjusted_df[scheme_col] / total_fixed * 100, 4)
-
-                                # 步骤8：反馈结果
-                                modified_hours = [str(adjusted_df.loc[idx, "时段"]) for idx in modified_indices]
-                                st.success(
-                                    f"✅ 调整成功！（刷新页面后保留此状态）\n"
-                                    f"- 修改时段：{len(modified_indices)}个（{', '.join(modified_hours)}点）\n"
-                                    f"- 总调整量：{total_delta:.2f} MWh\n"
-                                    f"- 分摊方式：未修改的{len(unmodified_indices)}个时段按权重分摊\n"
-                                    f"- 总电量保持：{total_fixed:.2f} MWh"
-                                )
-
-                                # 关键：仅应用时同步数据到session_state（最终数据+临时显示数据）
-                                if adj_scheme == "方案一（典型曲线）":
-                                    st.session_state.trade_power_typical[adj_month] = adjusted_df
-                                else:
-                                    st.session_state.trade_power_arbitrage[adj_month] = adjusted_df
-                                # 更新临时显示数据（下次打开表格显示调整后的数据）
-                                st.session_state.temp_adjust_data[data_key] = adjusted_df.copy()
-
+if not tune_periods:
+    st.warning("该方案暂无时段电量数据，请先生成/调整方案！")
 else:
-    st.warning("⚠️ 请先生成年度方案后再进行电量调整")
+    if tune_base_total <= 0:
+        st.warning("请先执行「比例调整」设置基准总量！")
+    else:
+        # 显示基准总量
+        st.info(f"🔒 锁定基准总量：{tune_base_total:.2f} MWh（修改时段后自动分摊差额）")
+        
+        # 2. 选择要修改的时段+输入新值
+        col_tune_3, col_tune_4 = st.columns([2, 2])
+        with col_tune_3:
+            target_period = st.selectbox("选择要修改的时段", list(tune_periods.keys()), key=f"{unique_prefix_ratio_tune}_tune_period")
+        with col_tune_4:
+            new_power = st.number_input(
+                f"{target_period} 新电量(MWh)",
+                min_value=0.0, value=tune_periods[target_period], step=0.1,
+                key=f"{unique_prefix_ratio_tune}_tune_power"
+            )
+        
+        # 3. 执行微调（核心：自动分摊差额）
+        if st.button(f"✅ 执行{target_period}电量微调", key=f"{unique_prefix_ratio_tune}_tune_execute"):
+            # 步骤1：计算差额（目标值 - 原值）
+            original_power = tune_periods[target_period]
+            diff = round(new_power - original_power, 2)
+            
+            if diff == 0:
+                st.info("无差额：新值与原值一致！")
+            else:
+                # 步骤2：获取其他时段（排除当前修改的时段）
+                other_periods = {p: v for p, v in tune_periods.items() if p != target_period}
+                other_total = sum(other_periods.values())
+                
+                if not other_periods:
+                    st.error("无法分摊：仅单个时段，需手动调整总量！")
+                else:
+                    # 步骤3：按占比分摊差额（保证其他时段总量 ±diff，占比不变）
+                    new_other_periods = {}
+                    for p, v in other_periods.items():
+                        # 分摊系数 = 该时段占其他时段总量的比例
+                        ratio = v / other_total
+                        # 该时段需调整的量 = -diff × 比例（反向分摊，抵消差额）
+                        p_diff = round(-diff * ratio, 2)
+                        new_v = round(v + p_diff, 2)
+                        # 防止负数
+                        new_other_periods[p] = max(new_v, 0.01)
+                    
+                    # 步骤4：更新所有时段电量
+                    updated_periods = {**new_other_periods, target_period: new_power}
+                    # 最终校验：总量强制等于基准值（解决浮点误差）
+                    final_total = sum(updated_periods.values())
+                    total_diff = round(tune_base_total - final_total, 2)
+                    if abs(total_diff) > 0.01:
+                        # 误差分摊到第一个其他时段
+                        first_p = list(new_other_periods.keys())[0]
+                        updated_periods[first_p] = round(updated_periods[first_p] + total_diff, 2)
+                    
+                    # 步骤5：更新Session State（同步到scheme_power_data和现有方案数据）
+                    st.session_state.scheme_power_data[tune_month][tune_scheme]["periods"] = updated_periods
+                    # 同步到trade_power_typical/arbitrage，保证其他模块联动
+                    if tune_scheme == "方案一" and tune_month in st.session_state.trade_power_typical:
+                        st.session_state.trade_power_typical[tune_month]["方案一月度电量(MWh)"] = st.session_state.trade_power_typical[tune_month]["时段"].map(updated_periods)
+                    elif tune_scheme == "方案二" and tune_month in st.session_state.trade_power_arbitrage:
+                        st.session_state.trade_power_arbitrage[tune_month]["方案二月度电量(MWh)"] = st.session_state.trade_power_arbitrage[tune_month]["时段"].map(updated_periods)
+                    
+                    # 提示结果
+                    st.success(f"""
+                        微调完成！
+                        {target_period}：{original_power:.2f} → {new_power:.2f} MWh（差额：{diff:.2f}）
+                        差额已自动分摊到其他时段，总量锁定为 {tune_base_total:.2f} MWh
+                    """)
+                    st.write("微调后所有时段电量：")
+                    st.dataframe(
+                        pd.DataFrame(list(updated_periods.items()), columns=["时段", "电量(MWh)"]),
+                        hide_index=True, use_container_width=True
+                    )
+
 # -------------------------- 新增：收益计算功能（缩进+逻辑修复）--------------------------
 st.divider()
 st.header("💰 双方案收益计算（实时同步电量调整结果）")
