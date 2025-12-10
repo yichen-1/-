@@ -1,15 +1,46 @@
-
-import uuid  # 新增：生成唯一标识import streamlit as st
+# 第一步：调整导入顺序（Streamlit必须放在最顶部）+ 规范格式
+import streamlit as st  # 核心库优先导入
+import uuid  # 生成唯一标识（修复注释格式）
 import pandas as pd
 import numpy as np
 import os
 from datetime import datetime, date
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-import matplotlib.pyplot as plt  # 新增：导入matplotlib
-# 初始化月份选择状态（必须放在最前面！）
+import matplotlib.pyplot as plt  # 绘图库
+
+# -------------------------- 全局Session State初始化（统一放在导入后，避免缺失） --------------------------
+# 1. 月份选择状态（原有）
 if "selected_months" not in st.session_state:
     st.session_state.selected_months = []  # 初始为空，避免状态缺失
+
+# 2. 市场化小时数相关（新增，解决后续手动配置报错）
+if "auto_calculate" not in st.session_state:
+    st.session_state.auto_calculate = True  # 默认自动计算
+if "manual_market_hours_global" not in st.session_state:
+    st.session_state.manual_market_hours_global = 0.0  # 全局手动小时数
+if "manual_market_hours_monthly" not in st.session_state:
+    st.session_state.manual_market_hours_monthly = {month: 0.0 for month in range(1, 13)}  # 分月手动小时数
+
+# 3. 分月参数初始化（含电价、限电率等，避免KeyError）
+if "monthly_params" not in st.session_state:
+    st.session_state.monthly_params = {
+        month: {
+            "mechanism_mode": "小时数",
+            "mechanism_value": 0.0,
+            "guaranteed_mode": "小时数",
+            "guaranteed_value": 0.0,
+            "power_limit_rate": 0.0,
+            "mechanism_price": 0.0,
+            "guaranteed_price": 0.0
+        } for month in range(1, 13)
+    }
+
+# 4. 装机容量/基础数据等核心状态（可选，根据后续代码补充）
+if "installed_capacity" not in st.session_state:
+    st.session_state.installed_capacity = 0.0  # 装机容量（MW）
+if "monthly_data" not in st.session_state:
+    st.session_state.monthly_data = {}  # 分月基础数据存储
 
 # -------------------------- 必备：区域-省份映射字典（合并去重，保留详细版本） --------------------------
 REGIONS = {
@@ -24,7 +55,7 @@ REGIONS = {
     "内蒙古电网": ["蒙西"]
 }
 
-# -------------------------- 全局配置 & Session State 初始化（完善缺失默认值） --------------------------
+# -------------------------- 全局配置（页面样式） --------------------------
 st.set_page_config(
     page_title="新能源电厂年度方案设计系统",
     page_icon="⚡",
