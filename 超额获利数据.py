@@ -86,6 +86,7 @@ def extract_month_from_file(file, df=None):
     return f"{now.year}-{now.month:02d}"
 
 def to_excel(df, sheet_name="数据"):
+    """单Sheet Excel导出"""
     if df.empty:
         st.warning("⚠️ 数据为空，无法生成Excel文件")
         return BytesIO()
@@ -93,6 +94,86 @@ def to_excel(df, sheet_name="数据"):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_export.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output
+
+def aggregate_all_month_generated_data():
+    """汇总所有月份的实发数据（原始+24时段+统计）"""
+    # 汇总原始数据
+    all_raw_dfs = []
+    # 汇总24时段数据
+    all_24h_dfs = []
+    # 月份统计
+    month_stats = []
+    
+    for month, core_data in st.session_state.multi_month_data.items():
+        # 处理原始数据：添加月份列
+        raw_df = core_data["generated"]["raw"].copy()
+        if not raw_df.empty:
+            raw_df["数据月份"] = month
+            all_raw_dfs.append(raw_df)
+        
+        # 处理24时段数据：添加月份列
+        h24_df = core_data["generated"]["24h"].copy()
+        if not h24_df.empty:
+            h24_df["数据月份"] = month
+            all_24h_dfs.append(h24_df)
+        
+        # 统计月份数据
+        total = core_data["generated"]["total"]
+        stats_dict = {
+            "数据月份": month,
+            "涉及场站数": len(total),
+            "总发电量(MWh)": round(sum(total.values()), 2) if total else 0
+        }
+        # 添加各场站发电量
+        stats_dict.update(total)
+        month_stats.append(stats_dict)
+    
+    # 合并原始数据
+    merged_raw = pd.concat(all_raw_dfs, ignore_index=True) if all_raw_dfs else pd.DataFrame()
+    merged_raw = merged_raw.sort_values("时间").reset_index(drop=True)
+    merged_raw = force_unique_columns(merged_raw)
+    
+    # 合并24时段数据
+    merged_24h = pd.concat(all_24h_dfs, ignore_index=True) if all_24h_dfs else pd.DataFrame()
+    merged_24h = merged_24h.sort_values(["数据月份", "时段"]).reset_index(drop=True)
+    merged_24h = force_unique_columns(merged_24h)
+    
+    # 生成月份统计DF
+    month_stats_df = pd.DataFrame(month_stats)
+    month_stats_df = force_unique_columns(month_stats_df)
+    # 按月份排序
+    month_stats_df["数据月份_sort"] = pd.to_datetime(month_stats_df["数据月份"])
+    month_stats_df = month_stats_df.sort_values("数据月份_sort").drop("数据月份_sort", axis=1).reset_index(drop=True)
+    
+    return merged_raw, merged_24h, month_stats_df
+
+def to_aggregate_excel(merged_raw, merged_24h, month_stats_df):
+    """生成多Sheet汇总Excel文件"""
+    output = BytesIO()
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # 汇总sheet
+        if not merged_raw.empty:
+            merged_raw.to_excel(writer, index=False, sheet_name="01_所有月份原始数据汇总")
+        if not merged_24h.empty:
+            merged_24h.to_excel(writer, index=False, sheet_name="02_所有月份24时段汇总")
+        if not month_stats_df.empty:
+            month_stats_df.to_excel(writer, index=False, sheet_name="03_各月份发电量统计")
+        
+        # 各月份明细sheet
+        for month, core_data in st.session_state.multi_month_data.items():
+            # 原始数据明细
+            raw_df = core_data["generated"]["raw"].copy()
+            if not raw_df.empty:
+                raw_df.to_excel(writer, index=False, sheet_name=f"{month}_原始数据")
+            # 24时段明细
+            h24_df = core_data["generated"]["24h"].copy()
+            if not h24_df.empty:
+                h24_df.to_excel(writer, index=False, sheet_name=f"{month}_24时段数据")
+    
     output.seek(0)
     return output
 
@@ -340,7 +421,7 @@ class DataProcessor:
 st.title("📈 光伏/风电数据管理工具（多月份版）")
 
 # 月份选择器（核心新增）
-col_month, col_refresh = st.columns([2, 8])
+col_month, col_refresh, col_export_all = st.columns([2, 6, 2])
 with col_month:
     all_months = list(st.session_state.multi_month_data.keys())
     if all_months:
@@ -351,6 +432,20 @@ with col_month:
         )
     else:
         st.info("ℹ️ 暂无数据，请先上传文件")
+
+# 批量导出所有月份数据按钮
+with col_export_all:
+    if all_months:
+        if st.button("📥 批量导出所有月份", key="btn_batch_export"):
+            merged_raw, merged_24h, month_stats_df = aggregate_all_month_generated_data()
+            sum_excel = to_aggregate_excel(merged_raw, merged_24h, month_stats_df)
+            st.download_button(
+                "💾 下载全量汇总文件",
+                data=sum_excel,
+                file_name=f"实发数据全量汇总_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                key="download_batch_all",
+                use_container_width=True
+            )
 
 st.divider()
 
@@ -453,9 +548,12 @@ with st.expander("📊 模块1：场站实发配置", expanded=False):
             "光伏场站名单（逗号分隔）", value=st.session_state.module_config["generated"]["pv_list"], key="gen_pv_list"
         )
 
-    # 数据预览（当前月份）
+    # 数据预览（当前月份 + 汇总）
     if st.session_state.current_month:
         core_data = get_current_core_data()
+        # 检查是否有多个月份数据
+        has_multi_month = len(st.session_state.multi_month_data) > 1
+        
         if not core_data["generated"]["raw"].empty:
             st.subheader(f"📋 {st.session_state.current_month} 实发数据预览")
             display_raw = force_unique_columns(core_data["generated"]["raw"].copy())
@@ -483,6 +581,59 @@ with st.expander("📊 模块1：场站实发配置", expanded=False):
                     file_name=f"24时段实发汇总_{st.session_state.current_month}.xlsx",
                     key="download_gen_24h"
                 )
+            
+            # 汇总导出按钮（有多个月份时显示）
+            if has_multi_month:
+                st.subheader("📊 所有月份实发数据汇总")
+                # 生成汇总数据
+                merged_raw, merged_24h, month_stats_df = aggregate_all_month_generated_data()
+                
+                col_sum1, col_sum2, col_sum3 = st.columns(3)
+                with col_sum1:
+                    # 全量汇总
+                    sum_excel = to_aggregate_excel(merged_raw, merged_24h, month_stats_df)
+                    st.download_button(
+                        "💾 全量汇总下载",
+                        data=sum_excel,
+                        file_name=f"实发数据汇总_所有月份_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                        key="download_gen_all_aggregate",
+                        use_container_width=True
+                    )
+                with col_sum2:
+                    # 仅24时段汇总
+                    sum_24h_excel = to_excel(merged_24h, "所有月份24时段汇总")
+                    st.download_button(
+                        "💾 仅24时段汇总",
+                        data=sum_24h_excel,
+                        file_name=f"24时段实发汇总_所有月份_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                        key="download_gen_24h_aggregate",
+                        use_container_width=True
+                    )
+                with col_sum3:
+                    # 仅统计汇总
+                    sum_stats_excel = to_excel(month_stats_df, "各月份发电量统计")
+                    st.download_button(
+                        "💾 仅统计汇总",
+                        data=sum_stats_excel,
+                        file_name=f"月份发电量统计_所有月份_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                        key="download_gen_stats_aggregate",
+                        use_container_width=True
+                    )
+                
+                # 显示月份统计表格
+                st.dataframe(month_stats_df, use_container_width=True)
+                
+                # 可视化汇总
+                if not month_stats_df.empty:
+                    fig = px.bar(
+                        month_stats_df,
+                        x="数据月份",
+                        y="总发电量(MWh)",
+                        title="各月份总发电量对比",
+                        text_auto=True,
+                        color="数据月份"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
