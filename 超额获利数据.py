@@ -144,8 +144,9 @@ def aggregate_all_month_generated_data():
     month_stats_df = pd.DataFrame(month_stats)
     month_stats_df = force_unique_columns(month_stats_df)
     # 按月份排序
-    month_stats_df["数据月份_sort"] = pd.to_datetime(month_stats_df["数据月份"])
-    month_stats_df = month_stats_df.sort_values("数据月份_sort").drop("数据月份_sort", axis=1).reset_index(drop=True)
+    if not month_stats_df.empty:
+        month_stats_df["数据月份_sort"] = pd.to_datetime(month_stats_df["数据月份"])
+        month_stats_df = month_stats_df.sort_values("数据月份_sort").drop("数据月份_sort", axis=1).reset_index(drop=True)
     
     return merged_raw, merged_24h, month_stats_df
 
@@ -206,7 +207,7 @@ def get_current_core_data():
 # -------------------------- 5. 核心数据处理类 --------------------------
 class DataProcessor:
     @staticmethod
-    @st.cache_data(show_spinner="清洗功率数据中...", hash_funcs={BytesIO: lambda x: x.getvalue()})
+    @st.cache_data(show_spinner="清洗功率数据中...")
     def clean_power_value(value):
         if pd.isna(value):
             return None
@@ -220,7 +221,7 @@ class DataProcessor:
             return None
 
     @staticmethod
-    @st.cache_data(show_spinner="提取实发数据中...", hash_funcs={BytesIO: lambda x: x.getvalue()})
+    @st.cache_data(show_spinner="提取实发数据中...")
     def extract_generated_data(file, config, station_type):
         try:
             power_col = config["wind_power_col"] if station_type == "风电" else config["pv_power_col"]
@@ -259,7 +260,7 @@ class DataProcessor:
             return pd.DataFrame(columns=["时间"]), "", ""
 
     @staticmethod
-    @st.cache_data(show_spinner="提取持仓数据中...", hash_funcs={BytesIO: lambda x: x.getvalue()})
+    @st.cache_data(show_spinner="提取持仓数据中...")
     def extract_hold_data(file, config):
         try:
             file_suffix = file.name.split(".")[-1].lower()
@@ -282,10 +283,11 @@ class DataProcessor:
             return 0.0
 
     @staticmethod
-    @st.cache_data(show_spinner="提取电价数据中...", hash_funcs={BytesIO: lambda x: x.getvalue()})
+    @st.cache_data(show_spinner="提取电价数据中...")
     def extract_price_data(file, config):
         try:
-            file_suffix = file.name.split(".")[0].split("-")[-1].lower()
+            # 修复：正确提取文件后缀
+            file_suffix = file.name.split(".")[-1].lower()
             engine = "openpyxl" if file_suffix in ["xlsx", "xlsm"] else "xlrd"
             df = pd.read_excel(
                 BytesIO(file.getvalue()),
