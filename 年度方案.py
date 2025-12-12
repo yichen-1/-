@@ -10,7 +10,23 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import matplotlib.pyplot as plt  # 绘图库
 
 # -------------------------- 全局Session State初始化（统一放在导入后，避免缺失） --------------------------
+# -------------------------- 初始化全局变量（需放在代码最开头） --------------------------
+# 唯一前缀（避免多组件key冲突）
+unique_prefix_ratio_tune = "power_tune"
 
+# 初始化方案数据
+if "scheme_power_data" not in st.session_state:
+    st.session_state.scheme_power_data = {month: {"方案一": {}, "方案二": {}} for month in range(1, 13)}
+
+# 初始化调整比例记录
+if "adjust_ratio_records" not in st.session_state:
+    st.session_state.adjust_ratio_records = {month: {"方案一": 1.0, "方案二": 1.0} for month in range(1, 13)}
+
+# 🌟 新增：初始化调整日志（记录各月各方案的调整历史）
+if "adjustment_logs" not in st.session_state:
+    st.session_state.adjustment_logs = {
+        month: {"方案一": [], "方案二": []} for month in range(1, 13)
+    }
 # 新增：调整比例记录（按月份+方案存储最后一次调整比例）
 if "adjust_ratio_records" not in st.session_state:
     st.session_state.adjust_ratio_records = {month: {"方案一": 1.0, "方案二": 1.0} for month in range(1, 13)}
@@ -1792,6 +1808,73 @@ else:
     current_df = pd.DataFrame(list(tune_scheme_data["periods"].items()), columns=["时段", "电量(MWh)"])
     current_df = current_df.sort_values("时段").reset_index(drop=True)
     st.dataframe(current_df, hide_index=True, use_container_width=True)
+
+# -------------------------- 功能3：导出年度交易方案（含调整说明子表） --------------------------
+st.divider()
+st.write("### 📤 导出年度交易方案（含调整说明汇总）")
+
+if st.button("📥 生成并下载年度交易方案", key=f"{unique_prefix_ratio_tune}_export"):
+    # 1. 构建调整说明汇总表
+    desc_data = []
+    for month in range(1, 13):
+        for scheme in ["方案一", "方案二"]:
+            desc = generate_adjustment_description(month, scheme)
+            desc_data.append({
+                "月份": month,
+                "方案": scheme,
+                "调整说明": desc,
+                "最后调整比例": st.session_state.adjust_ratio_records[month][scheme],
+                "原始基准总量(MWh)": st.session_state.scheme_power_data[month][scheme].get("original_base_total", 0.0),
+                "当前基准总量(MWh)": st.session_state.scheme_power_data[month][scheme].get("base_total", 0.0)
+            })
+    desc_df = pd.DataFrame(desc_data)
+    
+    # 2. 构建Excel文件（包含方案数据+调整说明）
+    output_file = "年度交易方案及调整说明.xlsx"
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        # 写入各月方案数据（示例：根据实际数据结构调整）
+        for month in range(1, 13):
+            # 方案一数据
+            if month in st.session_state.get("trade_power_typical", {}):
+                st.session_state.trade_power_typical[month].to_excel(writer, sheet_name=f"{month}月方案一", index=False)
+            # 方案二数据
+            if month in st.session_state.get("trade_power_arbitrage", {}):
+                st.session_state.trade_power_arbitrage[month].to_excel(writer, sheet_name=f"{month}月方案二", index=False)
+        # 写入调整说明汇总表（🌟 核心：新增的说明子表）
+        desc_df.to_excel(writer, sheet_name="调整说明汇总", index=False)
+    
+    # 3. 提供下载按钮
+    with open(output_file, "rb") as f:
+        st.download_button(
+            label="📥 点击下载Excel文件",
+            data=f,
+            file_name=output_file,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{unique_prefix_ratio_tune}_download"
+        )
+    st.success("年度交易方案已生成！包含各月方案数据和调整说明汇总表。")
+# -------------------------- 工具函数：生成调整说明文本 --------------------------
+def generate_adjustment_description(month, scheme):
+    """生成指定月份和方案的调整说明文本"""
+    logs = st.session_state.adjustment_logs[month][scheme]
+    if not logs:
+        return "无调整记录，使用原始生成数据"
+    
+    desc = []
+    desc.append(f"{month}月{scheme}调整记录：")
+    for idx, log in enumerate(logs, 1):
+        if log["调整类型"] == "月度同步比例调整":
+            desc.append(
+                f"{idx}. 【比例调整】{log['调整时间']}：按×{log['调整比例']}缩放，"
+                f"原始总量{log[f'{scheme}原始总量']:.2f} MWh → 调整后总量{log[f'{scheme}调整后总量']:.2f} MWh"
+            )
+        elif log["调整类型"] == "分时段电量微调":
+            desc.append(
+                f"{idx}. 【时段微调】{log['调整时间']}：锁定基准总量{log['锁定基准总量']:.2f} MWh，"
+                f"修改后初始总量{log['修改后初始总量']:.2f} MWh，差额{log['差额']:.2f} MWh，"
+                f"已按比例分摊至各时段，最终总量{log['分摊后最终总量']:.2f} MWh"
+            )
+    return "\n".join(desc)
 
 # -------------------------- 新增：收益计算功能（缩进+逻辑修复）--------------------------
 st.divider()
