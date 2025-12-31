@@ -96,6 +96,123 @@ def to_excel(df, sheet_name="数据"):
     output.seek(0)
     return output
 
+# -------------------------- 新增：模板生成函数 --------------------------
+def generate_generated_template(station_type, config):
+    """生成实发数据模板（适配当前配置的列索引/跳过行数）"""
+    # 获取配置参数
+    time_col_idx = config["time_col"]
+    power_col_idx = config["wind_power_col"] if station_type == "风电" else config["pv_power_col"]
+    skip_rows = config["skip_rows"]
+    
+    # 确定最大列索引，确保模板覆盖配置列
+    max_col_idx = max(time_col_idx, power_col_idx)
+    template_data = []
+    
+    # 添加需要跳过的表头行（示例）
+    for i in range(skip_rows):
+        row = [f"表头行{i+1}" if j == 0 else "" for j in range(max_col_idx + 1)]
+        template_data.append(row)
+    
+    # 添加示例数据行（3行示例）
+    example_times = [
+        f"{datetime.datetime.now().strftime('%Y-%m-%d')} 00:00:00",
+        f"{datetime.datetime.now().strftime('%Y-%m-%d')} 01:00:00",
+        f"{datetime.datetime.now().strftime('%Y-%m-%d')} 02:00:00"
+    ]
+    # 风电/光伏功率示例值区分
+    example_powers = [12500.5, 13200.8, 14100.2] if station_type == "风电" else [9200.3, 8800.5, 9500.1]
+    
+    for i in range(len(example_times)):
+        row = [""] * (max_col_idx + 1)
+        row[time_col_idx] = example_times[i]  # 时间列填示例时间
+        row[power_col_idx] = example_powers[i]  # 功率列填示例值
+        template_data.append(row)
+    
+    # 构建模板DataFrame并命名关键列
+    df_template = pd.DataFrame(template_data)
+    if time_col_idx < len(df_template.columns):
+        df_template.rename(columns={time_col_idx: "时间（格式示例：YYYY-MM-DD HH:MM:SS）"}, inplace=True)
+    if power_col_idx < len(df_template.columns):
+        df_template.rename(columns={power_col_idx: f"{station_type}功率(kW)（数值示例）"}, inplace=True)
+    
+    # 生成Excel文件
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_template.to_excel(writer, index=False, sheet_name=f"{station_type}实发数据模板")
+    output.seek(0)
+    return output
+
+def generate_hold_template(config):
+    """生成持仓数据模板（适配当前配置的列索引/跳过行数）"""
+    hold_col_idx = config["hold_col"]
+    skip_rows = config["skip_rows"]
+    
+    max_col_idx = hold_col_idx
+    template_data = []
+    
+    # 添加跳过的表头行
+    for i in range(skip_rows):
+        row = [f"表头行{i+1}" if j == 0 else "" for j in range(max_col_idx + 1)]
+        template_data.append(row)
+    
+    # 添加示例持仓数据
+    example_holds = [150.8, 220.5, 310.2, 180.9]
+    for hold in example_holds:
+        row = [""] * (max_col_idx + 1)
+        row[hold_col_idx] = hold
+        template_data.append(row)
+    
+    # 构建模板并命名列
+    df_template = pd.DataFrame(template_data)
+    if hold_col_idx < len(df_template.columns):
+        df_template.rename(columns={hold_col_idx: "净持有电量(MWh)（数值示例）"}, inplace=True)
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_template.to_excel(writer, index=False, sheet_name="持仓数据模板")
+    output.seek(0)
+    return output
+
+def generate_price_template(config):
+    """生成电价数据模板（适配当前配置的列索引/跳过行数，包含24时段示例）"""
+    spot_col_idx = config["spot_col"]
+    wind_contract_col_idx = config["wind_contract_col"]
+    pv_contract_col_idx = config["pv_contract_col"]
+    skip_rows = config["skip_rows"]
+    
+    max_col_idx = max(spot_col_idx, wind_contract_col_idx, pv_contract_col_idx)
+    template_data = []
+    
+    # 添加跳过的表头行
+    for i in range(skip_rows):
+        row = [f"表头行{i+1}" if j == 0 else "" for j in range(max_col_idx + 1)]
+        template_data.append(row)
+    
+    # 添加24个时段的示例电价数据
+    for hour in range(24):
+        row = [""] * (max_col_idx + 1)
+        row[0] = f"{hour:02d}:00"  # 时段列固定在0索引
+        row[spot_col_idx] = round(0.35 + hour * 0.005, 2)  # 现货价示例
+        row[wind_contract_col_idx] = round(0.32 + hour * 0.003, 2)  # 风电合约价示例
+        row[pv_contract_col_idx] = round(0.33 + hour * 0.004, 2)  # 光伏合约价示例
+        template_data.append(row)
+    
+    # 构建模板并命名列
+    df_template = pd.DataFrame(template_data)
+    df_template.rename(columns={0: "时段（格式：HH:00）"}, inplace=True)
+    if spot_col_idx < len(df_template.columns):
+        df_template.rename(columns={spot_col_idx: "现货均价(元/MWh)（示例）"}, inplace=True)
+    if wind_contract_col_idx < len(df_template.columns):
+        df_template.rename(columns={wind_contract_col_idx: "风电合约均价(元/MWh)（示例）"}, inplace=True)
+    if pv_contract_col_idx < len(df_template.columns):
+        df_template.rename(columns={pv_contract_col_idx: "光伏合约均价(元/MWh)（示例）"}, inplace=True)
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_template.to_excel(writer, index=False, sheet_name="电价数据模板")
+    output.seek(0)
+    return output
+
 # -------------------------- 4. 会话状态初始化（按月份存储） --------------------------
 if "multi_month_data" not in st.session_state:
     st.session_state.multi_month_data = {}  # 结构：{"2025-01": core_data, "2025-02": core_data}
@@ -453,6 +570,18 @@ with st.expander("📊 模块1：场站实发配置", expanded=False):
             "光伏场站名单（逗号分隔）", value=st.session_state.module_config["generated"]["pv_list"], key="gen_pv_list"
         )
 
+    # 新增：实发模板导出
+    st.subheader("1.4 模板导出")
+    col1_9 = st.columns(1)[0]
+    with col1_9:
+        st.download_button(
+            label=f"📥 导出{station_type}实发数据模板",
+            data=generate_generated_template(station_type, st.session_state.module_config["generated"]),
+            file_name=f"{station_type}实发数据模板.xlsx",
+            key="download_gen_template",
+            help="模板适配当前配置的列索引/跳过行数，包含示例数据可直接参考填写"
+        )
+
     # 数据预览（当前月份）
     if st.session_state.current_month:
         core_data = get_current_core_data()
@@ -529,6 +658,18 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=False):
             "跳过表头行数", min_value=0, value=st.session_state.module_config["hold"]["skip_rows"], key="hold_skip_rows"
         )
 
+    # 新增：持仓模板导出
+    st.subheader("2.3 模板导出")
+    col2_4 = st.columns(1)[0]
+    with col2_4:
+        st.download_button(
+            label="📥 导出持仓数据模板",
+            data=generate_hold_template(st.session_state.module_config["hold"]),
+            file_name="持仓数据模板.xlsx",
+            key="download_hold_template",
+            help="模板适配当前配置的列索引/跳过行数，包含示例数据可直接参考填写"
+        )
+
 st.divider()
 
 # ====================== 模块3：月度电价配置 ======================
@@ -567,6 +708,18 @@ with st.expander("💰 模块3：月度电价配置", expanded=False):
     with col3_5:
         st.session_state.module_config["price"]["pv_contract_col"] = st.number_input(
             "光伏合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["pv_contract_col"], key="price_pv_col"
+        )
+
+    # 新增：电价模板导出
+    st.subheader("3.3 模板导出")
+    col3_6 = st.columns(1)[0]
+    with col3_6:
+        st.download_button(
+            label="📥 导出电价数据模板",
+            data=generate_price_template(st.session_state.module_config["price"]),
+            file_name="电价数据模板.xlsx",
+            key="download_price_template",
+            help="模板包含24个时段示例数据，适配当前配置的列索引/跳过行数"
         )
 
     # 电价数据预览（当前月份）
