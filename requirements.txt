@@ -4,3 +4,5 @@ openpyxl>=3.0.9
 plotly>=5.0.0
 matplotlib>=3.7.0  
 pdfplumber>=0.9.0
+# 安装必备依赖
+pip install openpyxl>=3.0.0 streamlit>=1.28.0
