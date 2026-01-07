@@ -646,11 +646,11 @@ with st.expander("💰 模块3：月度电价配置", expanded=False):
                 manual_month = st.session_state.file_manual_month.get(price_file.name, "")
                 if not manual_month:
                     st.error(f"❌ 文件[{price_file.name}]未指定月份，请先填写月份")
-                    return
+                    st.stop()  # 替换return → 用st.stop()终止后续执行
                 
                 if manual_month != st.session_state.current_month:
                     st.warning(f"⚠️ 文件[{price_file.name}]属于{manual_month}，当前选中{st.session_state.current_month}，跳过")
-                    return
+                    st.stop()  # 替换return → 用st.stop()
                 
                 price_df, _ = DataProcessor.extract_price_data(
                     price_file, st.session_state.module_config["price"],
