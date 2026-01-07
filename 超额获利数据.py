@@ -97,7 +97,7 @@ if "module_config" not in st.session_state:
         "price": {"wind_spot_col":1, "wind_contract_col":2, "pv_spot_col":3, "pv_contract_col":4, "skip_rows":1}
     }
 
-# -------------------------- 5. 核心数据处理类（新增负数归零逻辑） --------------------------
+# -------------------------- 5. 核心数据处理类（修复st.debug错误） --------------------------
 class DataProcessor:
     @staticmethod
     def clean_power_value(value):
@@ -298,11 +298,10 @@ class DataProcessor:
                 contract_price = row.get(contract_col, 0)
                 price_diff = spot_price - contract_price
                 
-                # 核心修改：单时段超额获利 负数归零（只统计正数）
+                # 核心逻辑：单时段超额获利 负数归零（只统计正数）
                 excess_profit = quantity_diff * price_diff
                 if excess_profit < 0:
                     excess_profit = 0  # 负数获利不计入，按0处理
-                    st.debug(f"时段[{row['时段']}]获利为负，已归零")
 
                 result_rows.append({
                     "场站名称": station,
@@ -558,7 +557,7 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
                 key="download_price_data"
             )
     
-    with col3_2:
+    with col2_2:
         st.markdown("### ⚙️ 列索引配置（0开始）")
         st.session_state.module_config["price"]["wind_spot_col"] = st.number_input(
             "风电现货列", 
