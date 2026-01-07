@@ -256,10 +256,10 @@ if st.button("🔍 立即计算", type="primary", key="btn_calc"):
         # 下载+绘图
         col1, col2 = st.columns(2)
         with col1:
-            st.download_button("💾 下载计算结果", to_excel(result_df), f"超额获利计算结果_{st.session_state.target_month}.xlsx")
+            st.download_button("💾 下载计算结果", to_excel(result_df), f"超额获利计算结果_{st.session_state.target_month}.xlsx", key="download_result")
         with col2:
             plot_df = result_df[result_df["时段"] != "总计"]
-            fig = px.bar(plot_df, x="时段", y="超额获利(元)", title="各时段超额获利", width=500)
+            fig = px.bar(plot_df, x="时段", y="超额获利(元)", title="各时段超额获利", width=500, key="profit_chart")
             st.plotly_chart(fig)
     else:
         st.error("❌ 请先上传并处理实发、持仓、电价数据！")
@@ -269,16 +269,16 @@ with st.expander("🔧 高级配置（默认值适配你的场景）"):
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("#### 实发数据配置")
-        st.session_state.module_config["generated"]["time_col"] = st.number_input("时间列索引", 0, value=4)
-        st.session_state.module_config["generated"]["power_col"] = st.number_input("功率列索引", 0, value=9)
-        st.session_state.module_config["generated"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
+        st.session_state.module_config["generated"]["time_col"] = st.number_input("时间列索引", 0, value=4, key="gen_time_col")
+        st.session_state.module_config["generated"]["power_col"] = st.number_input("功率列索引", 0, value=9, key="gen_power_col")
+        st.session_state.module_config["generated"]["skip_rows"] = st.number_input("实发数据跳过行数", 0, value=1, key="gen_skip_rows")  # 唯一label+key
     with col2:
         st.markdown("#### 持仓数据配置")
-        st.session_state.module_config["hold"]["hour_col"] = st.number_input("时段列索引", 0, value=0)
-        st.session_state.module_config["hold"]["hold_col"] = st.number_input("持仓列索引", 0, value=1)
-        st.session_state.module_config["hold"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
+        st.session_state.module_config["hold"]["hour_col"] = st.number_input("时段列索引", 0, value=0, key="hold_hour_col")
+        st.session_state.module_config["hold"]["hold_col"] = st.number_input("持仓列索引", 0, value=1, key="hold_hold_col")
+        st.session_state.module_config["hold"]["skip_rows"] = st.number_input("持仓数据跳过行数", 0, value=1, key="hold_skip_rows")  # 唯一label+key
     with col3:
         st.markdown("#### 电价数据配置")
-        st.session_state.module_config["price"]["wind_spot_col"] = st.number_input("风电现货列", 0, value=1)
-        st.session_state.module_config["price"]["wind_contract_col"] = st.number_input("风电合约列", 0, value=2)
-        st.session_state.module_config["price"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
+        st.session_state.module_config["price"]["wind_spot_col"] = st.number_input("风电现货列", 0, value=1, key="price_wind_spot")
+        st.session_state.module_config["price"]["wind_contract_col"] = st.number_input("风电合约列", 0, value=2, key="price_wind_contract")
+        st.session_state.module_config["price"]["skip_rows"] = st.number_input("电价数据跳过行数", 0, value=1, key="price_skip_rows")  # 唯一label+key
