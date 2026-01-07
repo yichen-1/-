@@ -86,7 +86,7 @@ if "gen_data" not in st.session_state:
     st.session_state.gen_data = {"raw": pd.DataFrame(), "24h": pd.DataFrame(), "total": {}}
 if "hold_data" not in st.session_state:
     st.session_state.hold_data = {}
-if "binded_hold_data" not in st.session_state:  # 新增：绑定后的持仓数据
+if "binded_hold_data" not in st.session_state:
     st.session_state.binded_hold_data = {}
 if "price_data" not in st.session_state:
     st.session_state.price_data = {"24h": pd.DataFrame(), "excess_profit": pd.DataFrame()}
@@ -97,7 +97,7 @@ if "module_config" not in st.session_state:
         "price": {"wind_spot_col":1, "wind_contract_col":2, "pv_spot_col":3, "pv_contract_col":4, "skip_rows":1}
     }
 
-# -------------------------- 5. 核心数据处理类 --------------------------
+# -------------------------- 5. 核心数据处理类（新增负数归零逻辑） --------------------------
 class DataProcessor:
     @staticmethod
     def clean_power_value(value):
@@ -273,7 +273,6 @@ class DataProcessor:
                 st.warning(f"⚠️ 场站[{station}]无法匹配类型，跳过计算")
                 continue
 
-            # 直接使用绑定后的持仓数据（核心修改）
             total_hold = hold_dict.get(station, 0)
             if total_hold == 0:
                 st.warning(f"⚠️ 场站[{station}]无绑定持仓数据，跳过计算")
@@ -286,6 +285,7 @@ class DataProcessor:
                 hourly_generated_raw = row.get(station, 0)
                 hourly_generated = hourly_generated_raw * gen_coeff
                 
+                # 电量差额计算
                 if hourly_generated > hourly_hold * 1.1:
                     quantity_diff = hourly_generated - hourly_hold * 1.1
                 elif hourly_generated < hourly_hold * 0.9:
@@ -293,10 +293,16 @@ class DataProcessor:
                 else:
                     quantity_diff = 0
                 
+                # 价格差值计算
                 spot_price = row.get(spot_col, 0)
                 contract_price = row.get(contract_col, 0)
                 price_diff = spot_price - contract_price
+                
+                # 核心修改：单时段超额获利 负数归零（只统计正数）
                 excess_profit = quantity_diff * price_diff
+                if excess_profit < 0:
+                    excess_profit = 0  # 负数获利不计入，按0处理
+                    st.debug(f"时段[{row['时段']}]获利为负，已归零")
 
                 result_rows.append({
                     "场站名称": station,
@@ -317,6 +323,7 @@ class DataProcessor:
 
         result_df = pd.DataFrame(result_rows)
         if not result_df.empty:
+            # 总计行：仅统计正数获利的总和
             total_row = {
                 "场站名称": "总计",
                 "场站类型": "",
@@ -334,15 +341,15 @@ class DataProcessor:
                 "光伏合约均价(元/MWh)": "",
                 "风电价格差值(元/MWh)": "",
                 "光伏价格差值(元/MWh)": "",
-                "超额获利(元)": round(result_df["超额获利(元)"].sum(), 2)
+                "超额获利(元)": round(result_df["超额获利(元)"].sum(), 2)  # 仅正数求和
             }
             result_df = pd.concat([result_df, pd.DataFrame([total_row])], ignore_index=True)
-            st.success(f"✅ 超额获利计算完成，共{len(result_df)-1}行数据 + 1行总计")
+            st.success(f"✅ 超额获利计算完成（仅统计正数），共{len(result_df)-1}行数据 + 1行总计")
         
         return result_df
 
-# -------------------------- 6. 页面布局（新增手动绑定功能） --------------------------
-st.title("📈 光伏/风电超额获利计算工具（2025-11专用）")
+# -------------------------- 6. 页面布局 --------------------------
+st.title("📈 光伏/风电超额获利计算工具（2025-11专用版）")
 
 # 固定月份选择
 st.sidebar.markdown("### 📅 数据月份")
@@ -447,7 +454,7 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
                 key="download_gen_24h"
             )
 
-# ====================== 模块2：中长期持仓配置（新增手动绑定） ======================
+# ====================== 模块2：中长期持仓配置 ======================
 with st.expander("📦 模块2：中长期持仓配置", expanded=True):
     col2_1, col2_2 = st.columns([3, 2])
     with col2_1:
@@ -473,12 +480,10 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=True):
                 st.success("✅ 持仓数据处理完成！")
                 st.write(f"📊 原始持仓数据：{hold_total}")
         
-        # 新增：手动绑定持仓到实发场站
+        # 手动绑定持仓到实发场站
         if st.session_state.hold_data and not st.session_state.gen_data["24h"].empty:
             st.markdown("### 🔗 手动绑定持仓到实发场站")
-            # 获取实发场站列表
             gen_stations = [col for col in st.session_state.gen_data["24h"].columns if col != "时段"]
-            # 获取持仓项列表
             hold_items = list(st.session_state.hold_data.keys())
             
             if gen_stations and hold_items:
@@ -587,13 +592,12 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
         )
 
 # ====================== 模块4：超额获利计算 ======================
-st.markdown("### 🎯 超额获利计算")
+st.markdown("### 🎯 超额获利计算（仅统计正数部分）")
 if st.button(
     "🔍 计算超额获利", 
     key="btn_calc_excess_profit",
     type="primary"
 ):
-    # 使用绑定后的持仓数据
     use_hold_data = st.session_state.binded_hold_data if st.session_state.binded_hold_data else st.session_state.hold_data
     
     excess_df = DataProcessor.calculate_excess_profit(
@@ -605,10 +609,10 @@ if st.button(
     st.session_state.price_data["excess_profit"] = excess_df
     
     if not excess_df.empty:
-        st.success("✅ 超额获利计算完成！")
+        st.success("✅ 超额获利计算完成（仅统计正数部分）！")
         st.dataframe(excess_df, use_container_width=True)
         total_profit = excess_df[excess_df["场站名称"] == "总计"]["超额获利(元)"].iloc[0]
-        st.metric(f"💰 {st.session_state.target_month} 总超额获利", value=f"{round(total_profit, 2)} 元")
+        st.metric(f"💰 {st.session_state.target_month} 总超额获利（仅正数）", value=f"{round(total_profit, 2)} 元")
         
         col_down, col_plot = st.columns(2)
         with col_down:
@@ -625,7 +629,7 @@ if st.button(
                 x="时段", 
                 y="超额获利(元)", 
                 color="场站名称", 
-                title=f"{st.session_state.target_month} 各场站分时段超额获利",
+                title=f"{st.session_state.target_month} 各场站分时段超额获利（仅正数）",
                 barmode="group"
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -635,5 +639,6 @@ if st.button(
         1. 是否已完成「手动绑定持仓到实发场站」；
         2. 绑定的持仓值是否大于0；
         3. 电价数据是否填写了非0值；
-        4. 实发数据是否有非0的发电量。
+        4. 实发数据是否有非0的发电量；
+        5. 是否有至少一个时段的获利为正数。
         """)
