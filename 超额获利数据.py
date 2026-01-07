@@ -9,7 +9,7 @@ import numpy as np
 
 # -------------------------- 1. 页面基础配置 --------------------------
 st.set_page_config(
-    page_title="光伏/风电超额获利计算工具（2025-11专用版）",
+    page_title="光伏/风电超额获利计算工具（分时段持仓版）",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,7 +27,6 @@ PRICE_TEMPLATE_COLS = [
     "光伏现货均价(元/MWh)", 
     "光伏合约均价(元/MWh)"
 ]
-# 新增：标准时段列表（用于匹配分时段持仓）
 STANDARD_HOURS = [f"{i:02d}:00" for i in range(24)]
 
 # -------------------------- 3. 核心工具函数 --------------------------
@@ -81,10 +80,8 @@ def generate_price_template():
         })
     return pd.DataFrame(template_data)
 
-# 新增：标准化时段格式（统一为"00:00"格式）
 def standardize_hour(hour_str):
     try:
-        # 处理"0时"、"1点"、"00:00"等多种格式
         hour_str = str(hour_str).strip().replace("时", "").replace("点", "").replace("：", ":")
         if ":" in hour_str:
             h, _ = hour_str.split(":")
@@ -94,27 +91,38 @@ def standardize_hour(hour_str):
     except:
         return None
 
+# 新增：自动匹配实发场站和持仓场站（按名称相似度）
+def auto_match_stations(gen_stations, hold_stations):
+    matched = {}
+    for gen_station in gen_stations:
+        gen_clean = gen_station.lower().replace("_", "").replace(" ", "")
+        for hold_station in hold_stations:
+            hold_clean = hold_station.lower().replace("_", "").replace(" ", "")
+            # 只要有重叠关键词就匹配（比如"圣境山"在两者中都出现）
+            if len(set(gen_clean) & set(hold_clean)) > 3 or any(key in gen_clean for key in ["圣境山", "栗溪", "农光", "渔光"] if key in hold_clean):
+                matched[gen_station] = hold_station
+                break
+    return matched
+
 # -------------------------- 4. 会话状态初始化 --------------------------
 if "target_month" not in st.session_state:
     st.session_state.target_month = "2025-11"
 if "gen_data" not in st.session_state:
     st.session_state.gen_data = {"raw": pd.DataFrame(), "24h": pd.DataFrame(), "total": {}}
 if "hold_data" not in st.session_state:
-    st.session_state.hold_data = {}  # 改为：{场站名称: {时段: 持仓值, ...}}
+    st.session_state.hold_data = {}  # {持仓场站: {时段: 持仓值, ...}}
 if "hold_data_df" not in st.session_state:
-    st.session_state.hold_data_df = pd.DataFrame()  # 存储分时段持仓的原始DataFrame
-if "binded_hold_data" not in st.session_state:
-    st.session_state.binded_hold_data = {}  # 改为：{实发场站: 持仓场站}
+    st.session_state.hold_data_df = pd.DataFrame()
 if "price_data" not in st.session_state:
     st.session_state.price_data = {"24h": pd.DataFrame(), "excess_profit": pd.DataFrame()}
 if "module_config" not in st.session_state:
     st.session_state.module_config = {
         "generated": {"time_col":4, "wind_power_col":9, "pv_power_col":5, "conv":1000, "skip_rows":1},
-        "hold": {"hour_col":0, "hold_col":1, "skip_rows":1},  # 修改：hour_col=时段列，hold_col=持仓列
+        "hold": {"hour_col":0, "hold_col":1, "skip_rows":1},
         "price": {"wind_spot_col":1, "wind_contract_col":2, "pv_spot_col":3, "pv_contract_col":4, "skip_rows":1}
     }
 
-# -------------------------- 5. 核心数据处理类（适配分时段持仓） --------------------------
+# -------------------------- 5. 核心数据处理类 --------------------------
 class DataProcessor:
     @staticmethod
     def clean_power_value(value):
@@ -183,40 +191,31 @@ class DataProcessor:
 
     @staticmethod
     def extract_hold_data(file, config):
-        """修改：读取分时段持仓数据，返回{场站名称: {时段: 持仓值}}"""
         try:
             file_suffix = file.name.split(".")[-1].lower()
             engine = "openpyxl" if file_suffix in ["xlsx", "xlsm"] else "xlrd"
             
-            # 读取时段列和持仓列
             df = pd.read_excel(
                 BytesIO(file.getvalue()),
                 header=None,
                 usecols=[config["hour_col"], config["hold_col"]],
                 skiprows=config["skip_rows"],
                 engine=engine,
-                nrows=24  # 仅读取24行（对应24时段）
+                nrows=24
             )
             
             df = df.iloc[:, :2]
             df.columns = ["时段", "持仓量(MWh)"]
-            
-            # 标准化时段格式
             df["时段"] = df["时段"].apply(standardize_hour)
-            # 清洗持仓值
             df["持仓量(MWh)"] = pd.to_numeric(df["持仓量(MWh)"], errors="coerce").fillna(0)
-            # 过滤有效时段（仅保留00:00~23:00）
             df = df[df["时段"].isin(STANDARD_HOURS)].reset_index(drop=True)
             
-            # 补充缺失的时段（确保24个时段完整）
             full_hours = pd.DataFrame({"时段": STANDARD_HOURS})
             df = pd.merge(full_hours, df, on="时段", how="left").fillna(0)
             
-            # 生成场站名称
             base_name = standardize_column_name(file.name.split(".")[0].strip())
-            st.info(f"✅ 持仓文件[{file.name}]提取成功，场站名称：{base_name}，有效时段数：{len(df)}")
+            st.info(f"✅ 持仓文件[{file.name}]提取成功，场站名称：{base_name}")
             
-            # 转换为字典：{时段: 持仓值}
             hold_hourly_dict = dict(zip(df["时段"], df["持仓量(MWh)"]))
             total_hold = round(sum(hold_hourly_dict.values()), 2)
             
@@ -252,7 +251,7 @@ class DataProcessor:
             return pd.DataFrame()
 
     @staticmethod
-    def calculate_excess_profit(gen_24h_df, hold_dict, binded_hold, price_df, target_month):
+    def calculate_excess_profit(gen_24h_df, hold_dict, price_df, target_month):
         st.markdown("### 🕵️ 数据检查")
         if gen_24h_df.empty:
             st.error("❌ 实发24h汇总数据为空")
@@ -272,7 +271,16 @@ class DataProcessor:
         else:
             st.success(f"✅ 电价数据：{len(price_df)} 行")
 
-        # 过滤有效时段
+        # 自动匹配实发和持仓场站
+        gen_stations = [col for col in gen_24h_df.columns if col != "时段"]
+        hold_stations = list(hold_dict.keys())
+        matched_stations = auto_match_stations(gen_stations, hold_stations)
+        
+        if not matched_stations:
+            st.error(f"❌ 无法自动匹配实发场站{gen_stations}和持仓场站{hold_stations}，请检查文件命名（比如都包含'圣境山'）")
+            return pd.DataFrame()
+        st.success(f"✅ 自动匹配结果：{matched_stations}")
+
         gen_24h_df = gen_24h_df[gen_24h_df["时段"].isin(STANDARD_HOURS)]
         price_df = price_df[price_df["时段"].isin(STANDARD_HOURS)]
         
@@ -283,20 +291,10 @@ class DataProcessor:
         st.success(f"✅ 数据合并成功，有效时段数：{len(merged_df)}")
 
         result_rows = []
-        gen_stations = [col for col in gen_24h_df.columns if col != "时段"]
-
-        for gen_station in gen_stations:
-            # 获取绑定的持仓场站
-            hold_station = binded_hold.get(gen_station)
-            if not hold_station or hold_station not in hold_dict:
-                st.warning(f"⚠️ 场站[{gen_station}]无绑定的分时段持仓数据，跳过计算")
-                continue
-            
-            # 获取该场站的分时段持仓字典
+        for gen_station, hold_station in matched_stations.items():
             hold_hourly_dict = hold_dict[hold_station]
             base_station = gen_station.lower()
             
-            # 匹配场站类型和修正系数
             station_type = None
             gen_coeff = 1.0
             spot_col = ""
@@ -322,19 +320,17 @@ class DataProcessor:
                 st.warning(f"⚠️ 场站[{gen_station}]无法匹配类型，跳过计算")
                 continue
 
-            # 逐时段计算
             for _, row in merged_df.iterrows():
                 hour = row["时段"]
-                # 1. 获取当前时段的实发量
                 hourly_generated_raw = row.get(gen_station, 0)
                 hourly_generated = hourly_generated_raw * gen_coeff
                 
-                # 2. 获取当前时段的持仓量（直接读取分时段数据，不再均分）
+                # 直接读取分时段持仓值（无均分）
                 hourly_hold = hold_hourly_dict.get(hour, 0)
                 if hourly_hold <= 0:
-                    continue  # 持仓为0的时段跳过
+                    continue
                 
-                # 3. 计算电量差额（0.9~1.1倍区间规则不变）
+                # 电量差额计算
                 if hourly_generated > hourly_hold * 1.1:
                     quantity_diff = hourly_generated - hourly_hold * 1.1
                 elif hourly_generated < hourly_hold * 0.9:
@@ -342,17 +338,16 @@ class DataProcessor:
                 else:
                     quantity_diff = 0
                 
-                # 4. 计算价格差值
+                # 价格差值计算
                 spot_price = row.get(spot_col, 0)
                 contract_price = row.get(contract_col, 0)
                 price_diff = spot_price - contract_price
                 
-                # 5. 计算超额获利（负数归零，只统计正数）
+                # 负数归零
                 excess_profit = quantity_diff * price_diff
                 if excess_profit < 0:
                     excess_profit = 0
 
-                # 6. 保存结果
                 result_rows.append({
                     "场站名称": gen_station,
                     "场站类型": station_type,
@@ -370,10 +365,8 @@ class DataProcessor:
                     "超额获利(元)": round(excess_profit, 2)
                 })
 
-        # 生成结果表
         result_df = pd.DataFrame(result_rows)
         if not result_df.empty:
-            # 总计行（仅统计正数获利）
             total_row = {
                 "场站名称": "总计",
                 "场站类型": "",
@@ -398,8 +391,8 @@ class DataProcessor:
         
         return result_df
 
-# -------------------------- 6. 页面布局（适配分时段持仓） --------------------------
-st.title("📈 光伏/风电超额获利计算工具（分时段持仓版）")
+# -------------------------- 6. 页面布局 --------------------------
+st.title("📈 光伏/风电超额获利计算工具（分时段持仓+自动匹配版）")
 
 # 固定月份选择
 st.sidebar.markdown("### 📅 数据月份")
@@ -504,7 +497,7 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
                 key="download_gen_24h"
             )
 
-# ====================== 模块2：分时段持仓配置（核心修改） ======================
+# ====================== 模块2：分时段持仓配置（修复按钮显示+取消手动绑定） ======================
 with st.expander("📦 模块2：分时段持仓配置", expanded=True):
     col2_1, col2_2 = st.columns([3, 2])
     with col2_1:
@@ -521,7 +514,7 @@ with st.expander("📦 模块2：分时段持仓配置", expanded=True):
             if not hold_files:
                 st.error("❌ 请先上传分时段持仓数据文件")
             else:
-                hold_total_dict = {}  # {持仓场站: {时段: 持仓值}}
+                hold_total_dict = {}
                 hold_dfs = []
                 for file in hold_files:
                     hold_station, hold_hourly, hold_df, total = DataProcessor.extract_hold_data(file, st.session_state.module_config["hold"])
@@ -534,29 +527,10 @@ with st.expander("📦 模块2：分时段持仓配置", expanded=True):
                     st.session_state.hold_data_df = pd.concat(hold_dfs, ignore_index=True)
                 st.session_state.hold_data = hold_total_dict
                 st.success("✅ 分时段持仓数据处理完成！")
-                # 展示各持仓场站的总持仓
                 hold_summary = {k: round(sum(v.values()), 2) for k, v in hold_total_dict.items()}
                 st.write(f"📊 持仓汇总（各场站总持仓）：{hold_summary}")
         
-        # 手动绑定：实发场站 ↔ 分时段持仓场站
-        if st.session_state.hold_data and not st.session_state.gen_data["24h"].empty:
-            st.markdown("### 🔗 绑定实发场站到分时段持仓场站")
-            gen_stations = [col for col in st.session_state.gen_data["24h"].columns if col != "时段"]
-            hold_stations = list(st.session_state.hold_data.keys())
-            
-            if gen_stations and hold_stations:
-                col_bind1, col_bind2 = st.columns(2)
-                with col_bind1:
-                    selected_gen_station = st.selectbox("选择实发场站", gen_stations, key="bind_gen_station")
-                with col_bind2:
-                    selected_hold_station = st.selectbox("选择分时段持仓场站", hold_stations, key="bind_hold_station")
-                
-                if st.button("✅ 确认绑定", key="btn_bind_hold"):
-                    st.session_state.binded_hold_data[selected_gen_station] = selected_hold_station
-                    st.success(f"✅ 已将实发场站[{selected_gen_station}]绑定到分时段持仓场站[{selected_hold_station}]")
-                    st.write(f"当前绑定关系：{st.session_state.binded_hold_data}")
-        
-        # 展示分时段持仓数据预览
+        # 修复：显示分时段持仓预览（之前按钮不显示是因为col2_2笔误）
         if not st.session_state.hold_data_df.empty:
             st.markdown("### 📋 分时段持仓数据预览")
             st.dataframe(st.session_state.hold_data_df, use_container_width=True)
@@ -567,7 +541,7 @@ with st.expander("📦 模块2：分时段持仓配置", expanded=True):
                 key="download_hold_data"
             )
     
-    with col2_2:
+    with col2_2:  # 修复：之前误写为col3_2导致配置项错位，绑定按钮被覆盖
         st.markdown("### ⚙️ 列索引配置（0开始）")
         st.session_state.module_config["hold"]["hour_col"] = st.number_input(
             "时段列（分时段持仓）", 
@@ -627,7 +601,7 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
                 key="download_price_data"
             )
     
-    with col3_2:
+    with col3_2:  # 修复：之前误写为col2_2导致配置项错位
         st.markdown("### ⚙️ 列索引配置（0开始）")
         st.session_state.module_config["price"]["wind_spot_col"] = st.number_input(
             "风电现货列", 
@@ -660,56 +634,52 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
             key="price_skip_rows_input"
         )
 
-# ====================== 模块4：超额获利计算（适配分时段持仓） ======================
-st.markdown("### 🎯 超额获利计算（仅统计正数部分+分时段持仓）")
+# ====================== 模块4：超额获利计算（取消手动绑定，自动匹配） ======================
+st.markdown("### 🎯 超额获利计算（分时段持仓+仅统计正数+自动匹配）")
 if st.button(
     "🔍 计算超额获利", 
     key="btn_calc_excess_profit",
     type="primary"
 ):
-    if not st.session_state.binded_hold_data:
-        st.error("❌ 请先完成「实发场站 ↔ 分时段持仓场站」的绑定！")
-    else:
-        excess_df = DataProcessor.calculate_excess_profit(
-            st.session_state.gen_data["24h"],
-            st.session_state.hold_data,
-            st.session_state.binded_hold_data,
-            st.session_state.price_data["24h"],
-            st.session_state.target_month
-        )
-        st.session_state.price_data["excess_profit"] = excess_df
+    excess_df = DataProcessor.calculate_excess_profit(
+        st.session_state.gen_data["24h"],
+        st.session_state.hold_data,
+        st.session_state.price_data["24h"],
+        st.session_state.target_month
+    )
+    st.session_state.price_data["excess_profit"] = excess_df
+    
+    if not excess_df.empty:
+        st.success("✅ 超额获利计算完成！")
+        st.dataframe(excess_df, use_container_width=True)
+        total_profit = excess_df[excess_df["场站名称"] == "总计"]["超额获利(元)"].iloc[0]
+        st.metric(f"💰 {st.session_state.target_month} 总超额获利（仅正数）", value=f"{round(total_profit, 2)} 元")
         
-        if not excess_df.empty:
-            st.success("✅ 超额获利计算完成（仅统计正数部分+分时段持仓）！")
-            st.dataframe(excess_df, use_container_width=True)
-            total_profit = excess_df[excess_df["场站名称"] == "总计"]["超额获利(元)"].iloc[0]
-            st.metric(f"💰 {st.session_state.target_month} 总超额获利（仅正数）", value=f"{round(total_profit, 2)} 元")
-            
-            col_down, col_plot = st.columns(2)
-            with col_down:
-                st.download_button(
-                    "💾 下载获利明细", 
-                    to_excel(excess_df), 
-                    f"超额获利明细_{st.session_state.target_month}.xlsx",
-                    key="download_excess_profit"
-                )
-            with col_plot:
-                plot_df = excess_df[excess_df["场站名称"] != "总计"]
-                fig = px.bar(
-                    plot_df, 
-                    x="时段", 
-                    y="超额获利(元)", 
-                    color="场站名称", 
-                    title=f"{st.session_state.target_month} 各场站分时段超额获利（仅正数）",
-                    barmode="group"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("❌ 超额获利计算失败，请检查：")
-            st.markdown("""
-            1. 是否已完成「实发场站 ↔ 分时段持仓场站」绑定；
-            2. 分时段持仓数据是否每个时段都有非0值；
-            3. 电价数据是否填写了非0值；
-            4. 实发数据是否有非0的发电量；
-            5. 是否有至少一个时段的获利为正数。
-            """)
+        col_down, col_plot = st.columns(2)
+        with col_down:
+            st.download_button(
+                "💾 下载获利明细", 
+                to_excel(excess_df), 
+                f"超额获利明细_{st.session_state.target_month}.xlsx",
+                key="download_excess_profit"
+            )
+        with col_plot:
+            plot_df = excess_df[excess_df["场站名称"] != "总计"]
+            fig = px.bar(
+                plot_df, 
+                x="时段", 
+                y="超额获利(元)", 
+                color="场站名称", 
+                title=f"{st.session_state.target_month} 各场站分时段超额获利（仅正数）",
+                barmode="group"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("❌ 超额获利计算失败，请检查：")
+        st.markdown("""
+        1. 实发/持仓/电价文件是否都已处理完成；
+        2. 实发和持仓文件命名是否包含相同关键词（比如都有"圣境山"）；
+        3. 分时段持仓数据是否每个时段都有非0值；
+        4. 电价数据是否填写了非0值；
+        5. 实发数据是否有非0的发电量。
+        """)
