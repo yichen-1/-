@@ -20,6 +20,15 @@ STATION_TYPE_MAP = {
     "光伏": ["襄北农光", "浠水渔光"]
 }
 
+# 新增：电价模板列名常量
+PRICE_TEMPLATE_COLS = [
+    "时段", 
+    "风电现货均价(元/MWh)", 
+    "风电合约均价(元/MWh)", 
+    "光伏现货均价(元/MWh)", 
+    "光伏合约均价(元/MWh)"
+]
+
 # -------------------------- 3. 核心工具函数 --------------------------
 def standardize_column_name(col):
     """列名标准化"""
@@ -96,6 +105,21 @@ def to_excel(df, sheet_name="数据"):
     output.seek(0)
     return output
 
+# 新增：生成电价模板函数
+def generate_price_template():
+    """生成标准电价模板（24时段，5列）"""
+    template_data = []
+    for hour in range(24):
+        template_data.append({
+            "时段": f"{hour:02d}:00",
+            "风电现货均价(元/MWh)": 0.0,
+            "风电合约均价(元/MWh)": 0.0,
+            "光伏现货均价(元/MWh)": 0.0,
+            "光伏合约均价(元/MWh)": 0.0
+        })
+    df_template = pd.DataFrame(template_data)
+    return df_template
+
 # -------------------------- 4. 会话状态初始化（按月份存储） --------------------------
 if "multi_month_data" not in st.session_state:
     st.session_state.multi_month_data = {}  # 结构：{"2025-01": core_data, "2025-02": core_data}
@@ -108,7 +132,14 @@ if "module_config" not in st.session_state:
             "pv_list": "浠水渔光,襄北农光", "conv": 1000, "skip_rows": 1, "keyword": "历史趋势"
         },
         "hold": {"hold_col": 3, "skip_rows": 1},
-        "price": {"spot_col": 1, "wind_contract_col": 2, "pv_contract_col": 3, "skip_rows": 1}
+        # 修改：更新电价配置列索引（对应5列模板）
+        "price": {
+            "wind_spot_col": 1,      # 风电现货均价列
+            "wind_contract_col": 2,  # 风电合约均价列
+            "pv_spot_col": 3,        # 光伏现货均价列
+            "pv_contract_col": 4,    # 光伏合约均价列
+            "skip_rows": 1
+        }
     }
 
 # 获取当前选中月份的核心数据
@@ -204,22 +235,27 @@ class DataProcessor:
     @st.cache_data(show_spinner="提取电价数据中...", hash_funcs={BytesIO: lambda x: x.getvalue()})
     def extract_price_data(file, config):
         try:
-            file_suffix = file.name.split(".")[0].split("-")[-1].lower()
+            file_suffix = file.name.split(".")[-1].lower()  # 修复：原代码错误取文件名前缀作为后缀
             engine = "openpyxl" if file_suffix in ["xlsx", "xlsm"] else "xlrd"
             df = pd.read_excel(
                 BytesIO(file.getvalue()),
                 header=None,
-                usecols=[0, config["spot_col"], config["wind_contract_col"], config["pv_contract_col"]],
+                # 修改：读取5列（时段+4个价格列）
+                usecols=[0, config["wind_spot_col"], config["wind_contract_col"], 
+                         config["pv_spot_col"], config["pv_contract_col"]],
                 skiprows=config["skip_rows"],
                 engine=engine,
                 nrows=24
             )
             df = force_unique_columns(df)
-            df = df.iloc[:, :4]
-            df.columns = ["时段", "现货均价(元/MWh)", "风电合约均价(元/MWh)", "光伏合约均价(元/MWh)"]
+            df = df.iloc[:, :5]
+            # 修改：使用标准模板列名
+            df.columns = PRICE_TEMPLATE_COLS
             
+            # 标准化时段列
             df["时段"] = [f"{i:02d}:00" for i in range(24)]
-            price_cols = ["现货均价(元/MWh)", "风电合约均价(元/MWh)", "光伏合约均价(元/MWh)"]
+            # 价格列转数值型
+            price_cols = df.columns[1:]  # 除时段外的所有列
             for col in price_cols:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
             
@@ -261,6 +297,15 @@ class DataProcessor:
 
     @staticmethod
     def calculate_excess_profit(generated_24h_df, hold_total_dict, price_24h_df, current_month):
+        """
+        修改后的超额获利计算逻辑：
+        1. 实发电量：24时段分时总电量 × 系数（风电0.7，光伏0.8）
+        2. 合约电量校核：
+           - 若实发电量 > 合约电量×0.9 → 差额 = 实发电量 - 合约电量×1.1
+           - 若实发电量 < 合约电量×0.9 → 差额 = 实发电量 - 合约电量×0.9
+        3. 价格差值：现货均价 - 合约均价（风电/光伏分别计算）
+        4. 超额获利 = 电量差额 × 价格差值
+        """
         if generated_24h_df.empty or not hold_total_dict or price_24h_df.empty:
             st.warning("⚠️ 实发/持仓/电价数据不完整，无法计算超额获利")
             return pd.DataFrame()
@@ -287,13 +332,19 @@ class DataProcessor:
             for wind_station in STATION_TYPE_MAP["风电"]:
                 if wind_station in base_station or base_station in wind_station:
                     station_type = "风电"
+                    # 修改：匹配风电价格列
+                    spot_col = "风电现货均价(元/MWh)"
                     contract_col = "风电合约均价(元/MWh)"
+                    gen_coeff = 0.7  # 风电发电量系数
                     break
             if not station_type:
                 for pv_station in STATION_TYPE_MAP["光伏"]:
                     if pv_station in base_station or base_station in pv_station:
                         station_type = "光伏"
+                        # 修改：匹配光伏价格列
+                        spot_col = "光伏现货均价(元/MWh)"
                         contract_col = "光伏合约均价(元/MWh)"
+                        gen_coeff = 0.8  # 光伏发电量系数
                         break
             
             if not station_type:
@@ -308,29 +359,47 @@ class DataProcessor:
             if total_hold == 0:
                 continue
                 
+            # 计算分时合约电量（总持仓/24）
             hourly_hold = total_hold / 24
 
             for _, row in merged_df.iterrows():
-                hourly_generated = row.get(station, 0)
-                spot_price = row.get("现货均价(元/MWh)", 0)
+                # 1. 计算修正后实发电量（分时电量 × 场站类型系数）
+                hourly_generated_raw = row.get(station, 0)
+                hourly_generated = hourly_generated_raw * gen_coeff  # 风电×0.7，光伏×0.8
+                
+                # 2. 合约电量校核
+                hold_09 = hourly_hold * 0.9  # 合约电量0.9倍
+                hold_11 = hourly_hold * 1.1  # 合约电量1.1倍
+                
+                if hourly_generated > hold_09:
+                    quantity_diff = hourly_generated - hold_11  # 大于0.9倍，与1.1倍做差
+                else:
+                    quantity_diff = hourly_generated - hold_09  # 小于0.9倍，与0.9倍做差
+                
+                # 3. 价格差值（现货-合约）
+                spot_price = row.get(spot_col, 0)
                 contract_price = row.get(contract_col, 0)
+                price_diff = spot_price - contract_price
+                
+                # 4. 计算超额获利
+                excess_profit = quantity_diff * price_diff
 
-                excess_quantity = max(0, hourly_generated - hourly_hold)
-                excess_profit = excess_quantity * (spot_price - contract_price)
-
-                if excess_profit > 0:
-                    result_rows.append({
-                        "场站名称": base_station,
-                        "场站类型": station_type,
-                        "月份": current_month,
-                        "时段": row["时段"],
-                        "时段实发量(MWh)": round(hourly_generated, 2),
-                        "时段持仓量(MWh)": round(hourly_hold, 2),
-                        "超额电量(MWh)": round(excess_quantity, 2),
-                        "现货均价(元/MWh)": round(spot_price, 2),
-                        "合约均价(元/MWh)": round(contract_price, 2),
-                        "超额获利(元)": round(excess_profit, 2)
-                    })
+                result_rows.append({
+                    "场站名称": base_station,
+                    "场站类型": station_type,
+                    "月份": current_month,
+                    "时段": row["时段"],
+                    "原始分时实发量(MWh)": round(hourly_generated_raw, 2),
+                    "修正后实发量(MWh)": round(hourly_generated, 2),  # 新增：修正后电量
+                    "分时合约电量(MWh)": round(hourly_hold, 2),
+                    "合约电量0.9倍(MWh)": round(hold_09, 2),          # 新增：校核阈值
+                    "合约电量1.1倍(MWh)": round(hold_11, 2),          # 新增：校核阈值
+                    "电量差额(MWh)": round(quantity_diff, 2),         # 新增：电量差额
+                    f"{station_type}现货均价(元/MWh)": round(spot_price, 2),
+                    f"{station_type}合约均价(元/MWh)": round(contract_price, 2),
+                    f"{station_type}价格差值(元/MWh)": round(price_diff, 2),  # 新增：价格差值
+                    "超额获利(元)": round(excess_profit, 2)
+                })
 
         result_df = pd.DataFrame(result_rows)
         result_df = force_unique_columns(result_df)
@@ -531,13 +600,26 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=False):
 
 st.divider()
 
-# ====================== 模块3：月度电价配置 ======================
+# ====================== 模块3：月度电价配置（修改后） ======================
 with st.expander("💰 模块3：月度电价配置", expanded=False):
-    st.subheader("3.1 数据上传")
+    st.subheader("3.1 标准模板下载")
+    # 新增：模板导出功能
+    col3_0 = st.columns(1)[0]
+    with col3_0:
+        price_template_df = generate_price_template()
+        st.download_button(
+            "📥 下载电价标准模板（24时段）",
+            data=to_excel(price_template_df, "电价标准模板"),
+            file_name="电价标准模板.xlsx",
+            key="download_price_template"
+        )
+        st.info("💡 模板包含5列：时段、风电现货均价、风电合约均价、光伏现货均价、光伏合约均价，请按此格式填写后上传")
+
+    st.subheader("3.2 数据上传")
     col3_1, col3_2 = st.columns(2)
     with col3_1:
         price_file = st.file_uploader(
-            "上传电价数据文件（支持多月份）",
+            "上传电价数据文件（请使用标准模板）",
             accept_multiple_files=False,
             type=["xlsx", "xls", "xlsm"],
             key="price_file_upload"
@@ -554,19 +636,31 @@ with st.expander("💰 模块3：月度电价配置", expanded=False):
                 st.session_state.multi_month_data[st.session_state.current_month] = core_data
                 st.success("✅ 电价数据处理完成！")
 
-    st.subheader("3.2 列索引配置（索引从0开始）")
-    col3_3, col3_4, col3_5 = st.columns(3)
+    st.subheader("3.3 列索引配置（索引从0开始）")
+    # 修改：更新电价列索引配置项
+    col3_3, col3_4, col3_5, col3_6 = st.columns(4)
     with col3_3:
-        st.session_state.module_config["price"]["spot_col"] = st.number_input(
-            "现货均价列索引", min_value=0, value=st.session_state.module_config["price"]["spot_col"], key="price_spot_col"
+        st.session_state.module_config["price"]["wind_spot_col"] = st.number_input(
+            "风电现货均价列索引", min_value=0, value=st.session_state.module_config["price"]["wind_spot_col"], key="price_wind_spot_col"
         )
     with col3_4:
         st.session_state.module_config["price"]["wind_contract_col"] = st.number_input(
-            "风电合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["wind_contract_col"], key="price_wind_col"
+            "风电合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["wind_contract_col"], key="price_wind_contract_col"
         )
     with col3_5:
+        st.session_state.module_config["price"]["pv_spot_col"] = st.number_input(
+            "光伏现货均价列索引", min_value=0, value=st.session_state.module_config["price"]["pv_spot_col"], key="price_pv_spot_col"
+        )
+    with col3_6:
         st.session_state.module_config["price"]["pv_contract_col"] = st.number_input(
-            "光伏合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["pv_contract_col"], key="price_pv_col"
+            "光伏合约均价列索引", min_value=0, value=st.session_state.module_config["price"]["pv_contract_col"], key="price_pv_contract_col"
+        )
+    
+    # 补充：跳过行数配置
+    col3_7 = st.columns(1)[0]
+    with col3_7:
+        st.session_state.module_config["price"]["skip_rows"] = st.number_input(
+            "跳过表头行数", min_value=0, value=st.session_state.module_config["price"]["skip_rows"], key="price_skip_rows"
         )
 
     # 电价数据预览（当前月份）
