@@ -8,16 +8,16 @@ import plotly.express as px
 
 # -------------------------- 1. 页面基础配置 --------------------------
 st.set_page_config(
-    page_title="光伏/风电数据管理工具（2025-11专用版）",
+    page_title="光伏/风电超额获利计算工具（2025-11专用）",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# -------------------------- 2. 全局常量与映射 --------------------------
+# -------------------------- 2. 全局常量与映射（放宽匹配规则） --------------------------
 STATION_TYPE_MAP = {
-    "风电": ["荆门栗溪", "荆门圣境山", "襄北风储二期", "襄北风储一期", "襄州峪山一期"],
-    "光伏": ["襄北农光", "浠水渔光"]
+    "风电": ["荆门栗溪", "荆门圣境山", "襄北风储二期", "襄北风储一期", "襄州峪山一期", "风电"],
+    "光伏": ["襄北农光", "浠水渔光", "光伏"]
 }
 PRICE_TEMPLATE_COLS = [
     "时段", 
@@ -31,6 +31,7 @@ PRICE_TEMPLATE_COLS = [
 def standardize_column_name(col):
     col_str = str(col).strip() if col is not None else f"未知列_{uuid.uuid4().hex[:8]}"
     col_str = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '_', col_str)
+    col_str = col_str.lower()  # 统一小写，方便匹配
     if col_str == "" or col_str == "_":
         col_str = f"列_{uuid.uuid4().hex[:8]}"
     return col_str
@@ -77,9 +78,9 @@ def generate_price_template():
         })
     return pd.DataFrame(template_data)
 
-# -------------------------- 4. 会话状态初始化（简化版） --------------------------
+# -------------------------- 4. 会话状态初始化 --------------------------
 if "target_month" not in st.session_state:
-    st.session_state.target_month = "2025-11"  # 默认选中2025-11
+    st.session_state.target_month = "2025-11"
 if "gen_data" not in st.session_state:
     st.session_state.gen_data = {"raw": pd.DataFrame(), "24h": pd.DataFrame(), "total": {}}
 if "hold_data" not in st.session_state:
@@ -93,7 +94,7 @@ if "module_config" not in st.session_state:
         "price": {"wind_spot_col":1, "wind_contract_col":2, "pv_spot_col":3, "pv_contract_col":4, "skip_rows":1}
     }
 
-# -------------------------- 5. 核心数据处理类（简化版） --------------------------
+# -------------------------- 5. 核心数据处理类（修复计算逻辑+调试提示） --------------------------
 class DataProcessor:
     @staticmethod
     def clean_power_value(value):
@@ -132,6 +133,7 @@ class DataProcessor:
             base_name = file.name.split(".")[0].strip()
             unique_station_name = f"{standardize_column_name(base_name)}"
             df[unique_station_name] = df["功率(kW)"] / config["conv"]
+            st.info(f"✅ 实发文件[{file.name}]提取成功，场站名称：{unique_station_name}")
             return df[["时间", unique_station_name]].copy(), base_name
         except Exception as e:
             st.error(f"❌ 实发文件[{file.name}]处理失败：{str(e)}")
@@ -145,6 +147,7 @@ class DataProcessor:
 
         raw_df["时段"] = raw_df["时间"].dt.hour.apply(lambda x: f"{x:02d}:00")
         station_cols = [col for col in raw_df.columns if col not in ["时间", "时段"]]
+        st.info(f"🔍 识别到实发场站：{station_cols}")
         
         time_diff = raw_df["时间"].diff().dropna()
         avg_interval_h = time_diff.dt.total_seconds().mean() / 3600
@@ -155,6 +158,7 @@ class DataProcessor:
         ).round(2).reset_index()
         
         monthly_total = {station: round(generated_24h_df[station].sum(), 2) for station in station_cols}
+        st.success(f"✅ 24时段汇总完成，各场站总发电量：{monthly_total}")
         return generated_24h_df, monthly_total
 
     @staticmethod
@@ -171,10 +175,13 @@ class DataProcessor:
             )
             df.columns = ["净持有电量"]
             df["净持有电量"] = pd.to_numeric(df["净持有电量"], errors="coerce").fillna(0)
-            return round(df["净持有电量"].sum(), 2)
+            total_hold = round(df["净持有电量"].sum(), 2)
+            base_name = standardize_column_name(file.name.split(".")[0].strip())
+            st.info(f"✅ 持仓文件[{file.name}]提取成功，场站：{base_name}，总持仓：{total_hold} MWh")
+            return base_name, total_hold
         except Exception as e:
             st.error(f"❌ 持仓文件[{file.name}]处理失败：{str(e)}")
-            return 0.0
+            return "", 0.0
 
     @staticmethod
     def extract_price_data(file, config):
@@ -192,10 +199,12 @@ class DataProcessor:
             )
             df = df.iloc[:, :5]
             df.columns = PRICE_TEMPLATE_COLS
+            # 强制时段格式统一，避免匹配失败
             df["时段"] = [f"{i:02d}:00" for i in range(24)]
             price_cols = df.columns[1:]
             for col in price_cols:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            st.success(f"✅ 电价文件[{file.name}]提取成功，时段数：{len(df)}")
             return df
         except Exception as e:
             st.error(f"❌ 电价文件[{file.name}]处理失败：{str(e)}")
@@ -203,51 +212,77 @@ class DataProcessor:
 
     @staticmethod
     def calculate_excess_profit(gen_24h_df, hold_dict, price_df, target_month):
-        if gen_24h_df.empty or not hold_dict or price_df.empty:
-            st.warning("⚠️ 实发/持仓/电价数据不完整")
+        # 详细数据检查
+        st.markdown("### 🕵️ 数据检查")
+        if gen_24h_df.empty:
+            st.error("❌ 实发24h汇总数据为空")
             return pd.DataFrame()
+        else:
+            st.success(f"✅ 实发24h数据：{len(gen_24h_df)} 行，场站：{[col for col in gen_24h_df.columns if col != '时段']}")
+        
+        if not hold_dict:
+            st.error("❌ 持仓数据为空")
+            return pd.DataFrame()
+        else:
+            st.success(f"✅ 持仓数据：{hold_dict}")
+        
+        if price_df.empty:
+            st.error("❌ 电价数据为空")
+            return pd.DataFrame()
+        else:
+            st.success(f"✅ 电价数据：{len(price_df)} 行")
 
+        # 强制时段匹配
+        gen_24h_df = gen_24h_df[gen_24h_df["时段"].isin([f"{i:02d}:00" for i in range(24)])]
+        price_df = price_df[price_df["时段"].isin([f"{i:02d}:00" for i in range(24)])]
+        
         merged_df = pd.merge(gen_24h_df, price_df, on="时段", how="inner")
         if merged_df.empty:
-            st.warning("⚠️ 实发与电价时段不匹配")
+            st.error("❌ 实发与电价数据时段无法匹配")
             return pd.DataFrame()
+        st.success(f"✅ 数据合并成功，有效时段数：{len(merged_df)}")
 
         result_rows = []
         station_cols = [col for col in gen_24h_df.columns if col != "时段"]
 
         for station in station_cols:
-            base_station = station
+            base_station = station.lower()
             station_type = None
             gen_coeff = 1.0
             spot_col = ""
             contract_col = ""
             
-            # 匹配场站类型
-            for wind_station in STATION_TYPE_MAP["风电"]:
-                if wind_station in base_station or base_station in wind_station:
+            # 放宽场站类型匹配规则（模糊匹配）
+            for wind_key in STATION_TYPE_MAP["风电"]:
+                if wind_key.lower() in base_station or base_station in wind_key.lower():
                     station_type = "风电"
                     spot_col = "风电现货均价(元/MWh)"
                     contract_col = "风电合约均价(元/MWh)"
                     gen_coeff = 0.7
+                    st.info(f"🔍 匹配到场站[{station}]类型：风电，修正系数：{gen_coeff}")
                     break
             if not station_type:
-                for pv_station in STATION_TYPE_MAP["光伏"]:
-                    if pv_station in base_station or base_station in pv_station:
+                for pv_key in STATION_TYPE_MAP["光伏"]:
+                    if pv_key.lower() in base_station or base_station in pv_key.lower():
                         station_type = "光伏"
                         spot_col = "光伏现货均价(元/MWh)"
                         contract_col = "光伏合约均价(元/MWh)"
                         gen_coeff = 0.8
+                        st.info(f"🔍 匹配到场站[{station}]类型：光伏，修正系数：{gen_coeff}")
                         break
             if not station_type:
+                st.warning(f"⚠️ 场站[{station}]无法匹配类型，跳过计算")
                 continue
 
-            # 匹配持仓数据
+            # 放宽持仓匹配规则（模糊匹配）
             total_hold = 0
             for hold_station, hold_value in hold_dict.items():
-                if hold_station in base_station or base_station in hold_station:
+                if hold_station.lower() in base_station or base_station in hold_station.lower():
                     total_hold = hold_value
+                    st.info(f"🔍 场站[{station}]匹配到持仓：{hold_value} MWh")
                     break
             if total_hold == 0:
+                st.warning(f"⚠️ 场站[{station}]无匹配持仓数据，跳过计算")
                 continue
                 
             hourly_hold = total_hold / 24
@@ -256,13 +291,13 @@ class DataProcessor:
                 hourly_generated_raw = row.get(station, 0)
                 hourly_generated = hourly_generated_raw * gen_coeff
                 
-                hold_09 = hourly_hold * 0.9
-                hold_11 = hourly_hold * 1.1
-                
-                if hourly_generated > hold_09:
-                    quantity_diff = hourly_generated - hold_11
+                # 修正电量差额计算逻辑（更符合实际业务）
+                if hourly_generated > hourly_hold * 1.1:
+                    quantity_diff = hourly_generated - hourly_hold * 1.1
+                elif hourly_generated < hourly_hold * 0.9:
+                    quantity_diff = hourly_generated - hourly_hold * 0.9
                 else:
-                    quantity_diff = hourly_generated - hold_09
+                    quantity_diff = 0  # 在0.9-1.1倍之间无差额
                 
                 spot_price = row.get(spot_col, 0)
                 contract_price = row.get(contract_col, 0)
@@ -270,15 +305,15 @@ class DataProcessor:
                 excess_profit = quantity_diff * price_diff
 
                 result_rows.append({
-                    "场站名称": base_station,
+                    "场站名称": station,
                     "场站类型": station_type,
                     "月份": target_month,
                     "时段": row["时段"],
                     "原始分时实发量(MWh)": round(hourly_generated_raw, 2),
                     "修正后实发量(MWh)": round(hourly_generated, 2),
                     "分时合约电量(MWh)": round(hourly_hold, 2),
-                    "合约电量0.9倍(MWh)": round(hold_09, 2),
-                    "合约电量1.1倍(MWh)": round(hold_11, 2),
+                    "合约电量0.9倍(MWh)": round(hourly_hold * 0.9, 2),
+                    "合约电量1.1倍(MWh)": round(hourly_hold * 1.1, 2),
                     "电量差额(MWh)": round(quantity_diff, 2),
                     f"{station_type}现货均价(元/MWh)": round(spot_price, 2),
                     f"{station_type}合约均价(元/MWh)": round(contract_price, 2),
@@ -286,9 +321,36 @@ class DataProcessor:
                     "超额获利(元)": round(excess_profit, 2)
                 })
 
-        return pd.DataFrame(result_rows)
+        # 生成结果并添加总计行
+        result_df = pd.DataFrame(result_rows)
+        if not result_df.empty:
+            # 计算总计
+            total_row = {
+                "场站名称": "总计",
+                "场站类型": "",
+                "月份": target_month,
+                "时段": "",
+                "原始分时实发量(MWh)": round(result_df["原始分时实发量(MWh)"].sum(), 2),
+                "修正后实发量(MWh)": round(result_df["修正后实发量(MWh)"].sum(), 2),
+                "分时合约电量(MWh)": round(result_df["分时合约电量(MWh)"].sum(), 2),
+                "合约电量0.9倍(MWh)": round(result_df["合约电量0.9倍(MWh)"].sum(), 2),
+                "合约电量1.1倍(MWh)": round(result_df["合约电量1.1倍(MWh)"].sum(), 2),
+                "电量差额(MWh)": round(result_df["电量差额(MWh)"].sum(), 2),
+                "风电现货均价(元/MWh)": "",
+                "风电合约均价(元/MWh)": "",
+                "光伏现货均价(元/MWh)": "",
+                "光伏合约均价(元/MWh)": "",
+                "风电价格差值(元/MWh)": "",
+                "光伏价格差值(元/MWh)": "",
+                "超额获利(元)": round(result_df["超额获利(元)"].sum(), 2)
+            }
+            # 插入总计行到最后
+            result_df = pd.concat([result_df, pd.DataFrame([total_row])], ignore_index=True)
+            st.success(f"✅ 超额获利计算完成，共{len(result_df)-1}行数据 + 1行总计")
+        
+        return result_df
 
-# -------------------------- 6. 页面布局（所有组件加唯一Key） --------------------------
+# -------------------------- 6. 页面布局（修复持仓处理逻辑） --------------------------
 st.title("📈 光伏/风电超额获利计算工具（2025-11专用）")
 
 # 固定月份选择
@@ -296,7 +358,7 @@ st.sidebar.markdown("### 📅 数据月份")
 st.session_state.target_month = st.sidebar.text_input(
     "目标月份", 
     value="2025-11",
-    key="sidebar_target_month"  # 唯一Key
+    key="sidebar_target_month"
 )
 st.sidebar.markdown("---")
 
@@ -307,17 +369,17 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
         station_type = st.radio(
             "选择场站类型", 
             ["风电", "光伏"], 
-            key="gen_type_radio"  # 唯一Key
+            key="gen_type_radio"
         )
         gen_files = st.file_uploader(
             f"上传{station_type}实发数据文件（支持多文件）",
             accept_multiple_files=True,
             type=["xlsx", "xls", "xlsm"],
-            key="gen_upload_file"  # 唯一Key
+            key="gen_upload_file"
         )
         if st.button(
             "📝 处理实发数据", 
-            key="btn_process_gen_data"  # 唯一Key
+            key="btn_process_gen_data"
         ):
             if not gen_files:
                 st.error("❌ 请先上传实发数据文件")
@@ -346,33 +408,33 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
             "时间列", 
             0, 
             value=4,
-            key="gen_time_col_input"  # 唯一Key
+            key="gen_time_col_input"
         )
         if station_type == "风电":
             st.session_state.module_config["generated"]["wind_power_col"] = st.number_input(
                 "功率列", 
                 0, 
                 value=9,
-                key="gen_wind_power_col_input"  # 唯一Key
+                key="gen_wind_power_col_input"
             )
         else:
             st.session_state.module_config["generated"]["pv_power_col"] = st.number_input(
                 "功率列", 
                 0, 
                 value=5,
-                key="gen_pv_power_col_input"  # 唯一Key
+                key="gen_pv_power_col_input"
             )
         st.session_state.module_config["generated"]["skip_rows"] = st.number_input(
             "跳过行数", 
             0, 
             value=1,
-            key="gen_skip_rows_input"  # 唯一Key
+            key="gen_skip_rows_input"
         )
         st.session_state.module_config["generated"]["conv"] = st.number_input(
             "转换系数(kW→MW)", 
             1, 
             value=1000,
-            key="gen_conv_input"  # 唯一Key
+            key="gen_conv_input"
         )
 
     # 数据预览
@@ -385,7 +447,7 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
                 "💾 下载原始数据", 
                 to_excel(st.session_state.gen_data["raw"]), 
                 f"实发原始数据_{st.session_state.target_month}.xlsx",
-                key="download_gen_raw"  # 唯一Key
+                key="download_gen_raw"
             )
         with tab2:
             st.dataframe(st.session_state.gen_data["24h"], use_container_width=True)
@@ -393,10 +455,10 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
                 "💾 下载24h汇总", 
                 to_excel(st.session_state.gen_data["24h"]), 
                 f"实发24h汇总_{st.session_state.target_month}.xlsx",
-                key="download_gen_24h"  # 唯一Key
+                key="download_gen_24h"
             )
 
-# ====================== 模块2：中长期持仓配置 ======================
+# ====================== 模块2：中长期持仓配置（修复数据存储逻辑） ======================
 with st.expander("📦 模块2：中长期持仓配置", expanded=True):
     col2_1, col2_2 = st.columns([3, 2])
     with col2_1:
@@ -404,20 +466,20 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=True):
             "上传持仓数据文件（支持多文件）",
             accept_multiple_files=True,
             type=["xlsx", "xls", "xlsm"],
-            key="hold_upload_file"  # 唯一Key
+            key="hold_upload_file"
         )
         if st.button(
             "📝 处理持仓数据", 
-            key="btn_process_hold_data"  # 唯一Key
+            key="btn_process_hold_data"
         ):
             if not hold_files:
                 st.error("❌ 请先上传持仓数据文件")
             else:
                 hold_total = {}
                 for file in hold_files:
-                    base_name = file.name.split(".")[0].strip()
-                    total = DataProcessor.extract_hold_data(file, st.session_state.module_config["hold"])
-                    hold_total[standardize_column_name(base_name)] = total
+                    hold_station, total = DataProcessor.extract_hold_data(file, st.session_state.module_config["hold"])
+                    if hold_station and total > 0:
+                        hold_total[hold_station] = total
                 st.session_state.hold_data = hold_total
                 st.success("✅ 持仓数据处理完成！")
                 st.write(f"📊 总持仓数据：{hold_total}")
@@ -428,13 +490,13 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=True):
             "净持仓列", 
             0, 
             value=3,
-            key="hold_col_input"  # 唯一Key
+            key="hold_col_input"
         )
         st.session_state.module_config["hold"]["skip_rows"] = st.number_input(
             "跳过行数", 
             0, 
             value=1,
-            key="hold_skip_rows_input"  # 唯一Key（修复核心：加唯一Key）
+            key="hold_skip_rows_input"
         )
 
 # ====================== 模块3：月度电价配置 ======================
@@ -446,18 +508,18 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
             "📥 下载模板", 
             to_excel(generate_price_template()), 
             "电价标准模板.xlsx",
-            key="download_price_template"  # 唯一Key
+            key="download_price_template"
         )
         
         price_file = st.file_uploader(
             "上传电价数据文件（用标准模板填写）",
             accept_multiple_files=False,
             type=["xlsx", "xls", "xlsm"],
-            key="price_upload_file"  # 唯一Key
+            key="price_upload_file"
         )
         if st.button(
             "📝 处理电价数据", 
-            key="btn_process_price_data"  # 唯一Key
+            key="btn_process_price_data"
         ):
             if not price_file:
                 st.error("❌ 请先上传电价数据文件")
@@ -474,7 +536,7 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
                 "💾 下载电价数据", 
                 to_excel(st.session_state.price_data["24h"]), 
                 f"电价数据_{st.session_state.target_month}.xlsx",
-                key="download_price_data"  # 唯一Key
+                key="download_price_data"
             )
     
     with col3_2:
@@ -483,38 +545,38 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
             "风电现货列", 
             0, 
             value=1,
-            key="price_wind_spot_col_input"  # 唯一Key
+            key="price_wind_spot_col_input"
         )
         st.session_state.module_config["price"]["wind_contract_col"] = st.number_input(
             "风电合约列", 
             0, 
             value=2,
-            key="price_wind_contract_col_input"  # 唯一Key
+            key="price_wind_contract_col_input"
         )
         st.session_state.module_config["price"]["pv_spot_col"] = st.number_input(
             "光伏现货列", 
             0, 
             value=3,
-            key="price_pv_spot_col_input"  # 唯一Key
+            key="price_pv_spot_col_input"
         )
         st.session_state.module_config["price"]["pv_contract_col"] = st.number_input(
             "光伏合约列", 
             0, 
             value=4,
-            key="price_pv_contract_col_input"  # 唯一Key
+            key="price_pv_contract_col_input"
         )
         st.session_state.module_config["price"]["skip_rows"] = st.number_input(
             "跳过行数", 
             0, 
             value=1,
-            key="price_skip_rows_input"  # 唯一Key
+            key="price_skip_rows_input"
         )
 
 # ====================== 模块4：超额获利计算 ======================
 st.markdown("### 🎯 超额获利计算")
 if st.button(
     "🔍 计算超额获利", 
-    key="btn_calc_excess_profit",  # 唯一Key
+    key="btn_calc_excess_profit",
     type="primary"
 ):
     excess_df = DataProcessor.calculate_excess_profit(
@@ -528,7 +590,8 @@ if st.button(
     if not excess_df.empty:
         st.success("✅ 超额获利计算完成！")
         st.dataframe(excess_df, use_container_width=True)
-        total_profit = excess_df["超额获利(元)"].sum()
+        # 提取总计行的金额
+        total_profit = excess_df[excess_df["场站名称"] == "总计"]["超额获利(元)"].iloc[0]
         st.metric(f"💰 {st.session_state.target_month} 总超额获利", value=f"{round(total_profit, 2)} 元")
         
         # 下载+可视化
@@ -538,10 +601,25 @@ if st.button(
                 "💾 下载获利明细", 
                 to_excel(excess_df), 
                 f"超额获利明细_{st.session_state.target_month}.xlsx",
-                key="download_excess_profit"  # 唯一Key
+                key="download_excess_profit"
             )
         with col_plot:
-            fig = px.bar(excess_df, x="时段", y="超额获利(元)", color="场站名称", title="分时段超额获利")
+            # 可视化时排除总计行
+            plot_df = excess_df[excess_df["场站名称"] != "总计"]
+            fig = px.bar(
+                plot_df, 
+                x="时段", 
+                y="超额获利(元)", 
+                color="场站名称", 
+                title=f"{st.session_state.target_month} 各场站分时段超额获利",
+                barmode="group"
+            )
             st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("ℹ️ 暂无超额获利数据（检查实发/持仓/电价数据是否完整）")
+        st.error("❌ 超额获利计算失败，请检查：")
+        st.markdown("""
+        1. 实发/持仓/电价数据是否都已上传并处理成功；
+        2. 场站名称是否能匹配（比如文件名包含“风电”/“光伏”关键词）；
+        3. 持仓数据是否大于0；
+        4. 电价数据是否填写了非0值。
+        """)
