@@ -79,7 +79,7 @@ def generate_price_template():
 
 # -------------------------- 4. 会话状态初始化（简化版） --------------------------
 if "target_month" not in st.session_state:
-    st.session_state.target_month = "2025-11"  # 默认选中2025-11，不用再选
+    st.session_state.target_month = "2025-11"  # 默认选中2025-11
 if "gen_data" not in st.session_state:
     st.session_state.gen_data = {"raw": pd.DataFrame(), "24h": pd.DataFrame(), "total": {}}
 if "hold_data" not in st.session_state:
@@ -288,26 +288,37 @@ class DataProcessor:
 
         return pd.DataFrame(result_rows)
 
-# -------------------------- 6. 页面布局（极简版，按钮全显示） --------------------------
+# -------------------------- 6. 页面布局（所有组件加唯一Key） --------------------------
 st.title("📈 光伏/风电超额获利计算工具（2025-11专用）")
 
-# 固定月份选择（不用再选，直接锁定2025-11）
+# 固定月份选择
 st.sidebar.markdown("### 📅 数据月份")
-st.session_state.target_month = st.sidebar.text_input("目标月份", value="2025-11")
+st.session_state.target_month = st.sidebar.text_input(
+    "目标月份", 
+    value="2025-11",
+    key="sidebar_target_month"  # 唯一Key
+)
 st.sidebar.markdown("---")
 
 # ====================== 模块1：场站实发配置 ======================
 with st.expander("📊 模块1：场站实发配置", expanded=True):
     col1_1, col1_2 = st.columns([3, 2])
     with col1_1:
-        station_type = st.radio("选择场站类型", ["风电", "光伏"], key="gen_type")
+        station_type = st.radio(
+            "选择场站类型", 
+            ["风电", "光伏"], 
+            key="gen_type_radio"  # 唯一Key
+        )
         gen_files = st.file_uploader(
             f"上传{station_type}实发数据文件（支持多文件）",
             accept_multiple_files=True,
             type=["xlsx", "xls", "xlsm"],
-            key="gen_upload"
+            key="gen_upload_file"  # 唯一Key
         )
-        if st.button("📝 处理实发数据", key="btn_gen"):
+        if st.button(
+            "📝 处理实发数据", 
+            key="btn_process_gen_data"  # 唯一Key
+        ):
             if not gen_files:
                 st.error("❌ 请先上传实发数据文件")
             else:
@@ -331,13 +342,38 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
     
     with col1_2:
         st.markdown("### ⚙️ 列索引配置（0开始）")
-        st.session_state.module_config["generated"]["time_col"] = st.number_input("时间列", 0, value=4)
+        st.session_state.module_config["generated"]["time_col"] = st.number_input(
+            "时间列", 
+            0, 
+            value=4,
+            key="gen_time_col_input"  # 唯一Key
+        )
         if station_type == "风电":
-            st.session_state.module_config["generated"]["wind_power_col"] = st.number_input("功率列", 0, value=9)
+            st.session_state.module_config["generated"]["wind_power_col"] = st.number_input(
+                "功率列", 
+                0, 
+                value=9,
+                key="gen_wind_power_col_input"  # 唯一Key
+            )
         else:
-            st.session_state.module_config["generated"]["pv_power_col"] = st.number_input("功率列", 0, value=5)
-        st.session_state.module_config["generated"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
-        st.session_state.module_config["generated"]["conv"] = st.number_input("转换系数(kW→MW)", 1, value=1000)
+            st.session_state.module_config["generated"]["pv_power_col"] = st.number_input(
+                "功率列", 
+                0, 
+                value=5,
+                key="gen_pv_power_col_input"  # 唯一Key
+            )
+        st.session_state.module_config["generated"]["skip_rows"] = st.number_input(
+            "跳过行数", 
+            0, 
+            value=1,
+            key="gen_skip_rows_input"  # 唯一Key
+        )
+        st.session_state.module_config["generated"]["conv"] = st.number_input(
+            "转换系数(kW→MW)", 
+            1, 
+            value=1000,
+            key="gen_conv_input"  # 唯一Key
+        )
 
     # 数据预览
     if not st.session_state.gen_data["raw"].empty:
@@ -345,10 +381,20 @@ with st.expander("📊 模块1：场站实发配置", expanded=True):
         tab1, tab2 = st.tabs(["原始数据", "24时段汇总"])
         with tab1:
             st.dataframe(st.session_state.gen_data["raw"], use_container_width=True)
-            st.download_button("💾 下载原始数据", to_excel(st.session_state.gen_data["raw"]), f"实发原始数据_{st.session_state.target_month}.xlsx")
+            st.download_button(
+                "💾 下载原始数据", 
+                to_excel(st.session_state.gen_data["raw"]), 
+                f"实发原始数据_{st.session_state.target_month}.xlsx",
+                key="download_gen_raw"  # 唯一Key
+            )
         with tab2:
             st.dataframe(st.session_state.gen_data["24h"], use_container_width=True)
-            st.download_button("💾 下载24h汇总", to_excel(st.session_state.gen_data["24h"]), f"实发24h汇总_{st.session_state.target_month}.xlsx")
+            st.download_button(
+                "💾 下载24h汇总", 
+                to_excel(st.session_state.gen_data["24h"]), 
+                f"实发24h汇总_{st.session_state.target_month}.xlsx",
+                key="download_gen_24h"  # 唯一Key
+            )
 
 # ====================== 模块2：中长期持仓配置 ======================
 with st.expander("📦 模块2：中长期持仓配置", expanded=True):
@@ -358,9 +404,12 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=True):
             "上传持仓数据文件（支持多文件）",
             accept_multiple_files=True,
             type=["xlsx", "xls", "xlsm"],
-            key="hold_upload"
+            key="hold_upload_file"  # 唯一Key
         )
-        if st.button("📝 处理持仓数据", key="btn_hold"):
+        if st.button(
+            "📝 处理持仓数据", 
+            key="btn_process_hold_data"  # 唯一Key
+        ):
             if not hold_files:
                 st.error("❌ 请先上传持仓数据文件")
             else:
@@ -375,23 +424,41 @@ with st.expander("📦 模块2：中长期持仓配置", expanded=True):
     
     with col2_2:
         st.markdown("### ⚙️ 列索引配置（0开始）")
-        st.session_state.module_config["hold"]["hold_col"] = st.number_input("净持仓列", 0, value=3)
-        st.session_state.module_config["hold"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
+        st.session_state.module_config["hold"]["hold_col"] = st.number_input(
+            "净持仓列", 
+            0, 
+            value=3,
+            key="hold_col_input"  # 唯一Key
+        )
+        st.session_state.module_config["hold"]["skip_rows"] = st.number_input(
+            "跳过行数", 
+            0, 
+            value=1,
+            key="hold_skip_rows_input"  # 唯一Key（修复核心：加唯一Key）
+        )
 
 # ====================== 模块3：月度电价配置 ======================
 with st.expander("💰 模块3：月度电价配置", expanded=True):
     col3_1, col3_2 = st.columns([3, 2])
     with col3_1:
         st.markdown("### 📥 下载电价标准模板")
-        st.download_button("📥 下载模板", to_excel(generate_price_template()), "电价标准模板.xlsx")
+        st.download_button(
+            "📥 下载模板", 
+            to_excel(generate_price_template()), 
+            "电价标准模板.xlsx",
+            key="download_price_template"  # 唯一Key
+        )
         
         price_file = st.file_uploader(
             "上传电价数据文件（用标准模板填写）",
             accept_multiple_files=False,
             type=["xlsx", "xls", "xlsm"],
-            key="price_upload"
+            key="price_upload_file"  # 唯一Key
         )
-        if st.button("📝 处理电价数据", key="btn_price"):
+        if st.button(
+            "📝 处理电价数据", 
+            key="btn_process_price_data"  # 唯一Key
+        ):
             if not price_file:
                 st.error("❌ 请先上传电价数据文件")
             else:
@@ -403,19 +470,53 @@ with st.expander("💰 模块3：月度电价配置", expanded=True):
         if not st.session_state.price_data["24h"].empty:
             st.markdown("### 📋 电价数据预览")
             st.dataframe(st.session_state.price_data["24h"], use_container_width=True)
-            st.download_button("💾 下载电价数据", to_excel(st.session_state.price_data["24h"]), f"电价数据_{st.session_state.target_month}.xlsx")
+            st.download_button(
+                "💾 下载电价数据", 
+                to_excel(st.session_state.price_data["24h"]), 
+                f"电价数据_{st.session_state.target_month}.xlsx",
+                key="download_price_data"  # 唯一Key
+            )
     
-    with col2_2:
+    with col3_2:
         st.markdown("### ⚙️ 列索引配置（0开始）")
-        st.session_state.module_config["price"]["wind_spot_col"] = st.number_input("风电现货列", 0, value=1)
-        st.session_state.module_config["price"]["wind_contract_col"] = st.number_input("风电合约列", 0, value=2)
-        st.session_state.module_config["price"]["pv_spot_col"] = st.number_input("光伏现货列", 0, value=3)
-        st.session_state.module_config["price"]["pv_contract_col"] = st.number_input("光伏合约列", 0, value=4)
-        st.session_state.module_config["price"]["skip_rows"] = st.number_input("跳过行数", 0, value=1)
+        st.session_state.module_config["price"]["wind_spot_col"] = st.number_input(
+            "风电现货列", 
+            0, 
+            value=1,
+            key="price_wind_spot_col_input"  # 唯一Key
+        )
+        st.session_state.module_config["price"]["wind_contract_col"] = st.number_input(
+            "风电合约列", 
+            0, 
+            value=2,
+            key="price_wind_contract_col_input"  # 唯一Key
+        )
+        st.session_state.module_config["price"]["pv_spot_col"] = st.number_input(
+            "光伏现货列", 
+            0, 
+            value=3,
+            key="price_pv_spot_col_input"  # 唯一Key
+        )
+        st.session_state.module_config["price"]["pv_contract_col"] = st.number_input(
+            "光伏合约列", 
+            0, 
+            value=4,
+            key="price_pv_contract_col_input"  # 唯一Key
+        )
+        st.session_state.module_config["price"]["skip_rows"] = st.number_input(
+            "跳过行数", 
+            0, 
+            value=1,
+            key="price_skip_rows_input"  # 唯一Key
+        )
 
 # ====================== 模块4：超额获利计算 ======================
 st.markdown("### 🎯 超额获利计算")
-if st.button("🔍 计算超额获利", key="btn_calc", type="primary"):
+if st.button(
+    "🔍 计算超额获利", 
+    key="btn_calc_excess_profit",  # 唯一Key
+    type="primary"
+):
     excess_df = DataProcessor.calculate_excess_profit(
         st.session_state.gen_data["24h"],
         st.session_state.hold_data,
@@ -433,7 +534,12 @@ if st.button("🔍 计算超额获利", key="btn_calc", type="primary"):
         # 下载+可视化
         col_down, col_plot = st.columns(2)
         with col_down:
-            st.download_button("💾 下载获利明细", to_excel(excess_df), f"超额获利明细_{st.session_state.target_month}.xlsx")
+            st.download_button(
+                "💾 下载获利明细", 
+                to_excel(excess_df), 
+                f"超额获利明细_{st.session_state.target_month}.xlsx",
+                key="download_excess_profit"  # 唯一Key
+            )
         with col_plot:
             fig = px.bar(excess_df, x="时段", y="超额获利(元)", color="场站名称", title="分时段超额获利")
             st.plotly_chart(fig, use_container_width=True)
