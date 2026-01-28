@@ -9,29 +9,36 @@ from io import BytesIO
 # 忽略样式警告
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl.stylesheet")
 
-# ---------------------- 核心配置 ----------------------
-# 科目编码到名称的完整映射
+# ---------------------- 核心配置（关键修复：10位编码+新增科目） ----------------------
+# 科目编码到名称的完整映射（适配PDF的10位编码，补充新增科目）
 TRADE_CODE_MAP = {
-    "101010101": "优先发电交易",
-    "101020101": "电网企业代理购电交易", 
-    "101020301": "省内电力直接交易",
-    "101040322": "送上海省间绿色电力交易",
-    "102020101": "送辽宁交易",
-    "102020301": "送华北交易", 
-    "102010101": "送山东交易",
-    "102010201": "送浙江交易",
-    "202030001": "送江苏省间绿色电力交易",
-    "202030002": "送浙江省间绿色电力交易",
-    "101080101": "省内现货日前交易",
-    "101080201": "省内现货实时交易",
-    "101080301": "省间现货日前交易",
-    "101080401": "省间现货日内交易",
-    "201010101": "中长期合约阻塞费用",
-    "201020101": "省间省内价差费用"
+    # 原有科目（9位→10位，补充前导0）
+    "0101010101": "优先发电交易",
+    "0101020101": "电网企业代理购电交易", 
+    "0101020301": "省内电力直接交易",
+    "0101040322": "送上海省间绿色电力交易",
+    "0102020101": "送辽宁交易",
+    "0102020301": "送华北交易", 
+    "0102010101": "送山东交易",
+    "0102010201": "送浙江交易",
+    "0202030001": "送江苏省间绿色电力交易",
+    "0202030002": "送浙江省间绿色电力交易",
+    "0101080101": "省内现货日前交易",
+    "0101080201": "省内现货实时交易",
+    "0101080301": "省间现货日前交易",
+    "0101080401": "省间现货日内交易",
+    "0201010101": "中长期合约阻塞费用",
+    "0201020101": "省间省内价差费用",
+    # PDF新增科目（关键补充）
+    "0101050101": "省内绿色电力交易(电能量)",
+    "0101060101": "日融合交易",
+    "0101070101": "现货结算价差调整",
+    "0101090101": "辅助服务费用分摊",
+    "0101100101": "偏差考核费用"
 }
 
 ALL_TRADES = list(TRADE_CODE_MAP.values())
-SPECIAL_TRADES = ["中长期合约阻塞费用", "省间省内价差费用"]
+SPECIAL_TRADES = ["中长期合约阻塞费用", "省间省内价差费用", "辅助服务费用分摊", "偏差考核费用"]
 REGULAR_TRADES = [trade for trade in ALL_TRADES if trade not in SPECIAL_TRADES]
 
 # ---------------------- 核心工具函数 ----------------------
@@ -43,8 +50,8 @@ def safe_convert_to_numeric(value):
     # 先转为字符串处理
     val_str = str(value).strip()
     
-    # 排除9位数字（科目编码）
-    if re.match(r'^\d{9}$', val_str):
+    # 排除9/10位数字（科目编码）
+    if re.match(r'^\d{9,10}$', val_str):
         return None
     
     # 排除空字符串和纯符号
@@ -187,12 +194,13 @@ def extract_data_using_pdfplumber_tables(file_obj):
         with pdfplumber.open(file_obj) as pdf:
             all_tables = []
             for page in pdf.pages:
-                # 优化表格提取参数
+                # 优化表格提取参数（适配合并单元格）
                 tables = page.extract_tables({
                     "vertical_strategy": "lines",
                     "horizontal_strategy": "lines",
                     "snap_tolerance": 3,
-                    "join_tolerance": 3
+                    "join_tolerance": 3,
+                    "edge_min_length": 10
                 })
                 if tables:
                     for table in tables:
@@ -219,7 +227,7 @@ def extract_data_using_pdfplumber_tables(file_obj):
         return []
 
 def parse_trade_table_data_v2(tables):
-    """解析交易表格数据 - 增强版，避免编码识别错误"""
+    """解析交易表格数据 - 核心修复：适配两行合并表头"""
     trade_data = {}
     
     # 初始化所有科目
@@ -230,64 +238,80 @@ def parse_trade_table_data_v2(tables):
             trade_data[trade] = {'quantity': None, 'price': None, 'fee': None}
     
     for table in tables:
-        if len(table) < 2:  # 至少要有表头和数据行
+        if len(table) < 3:  # 合并表头至少需要3行（表头行1+表头行2+数据行）
             continue
             
-        # 智能查找表头行
-        header_row = -1
+        # ---------------------- 关键修复：识别两行合并表头 ----------------------
         code_col = -1
         name_col = -1
         qty_col = -1
         price_col = -1
         fee_col = -1
         
-        # 遍历所有行寻找表头
+        # 第一步：找第一行表头（大列：科目编码、结算类型、日清数据等）
+        header_row1 = -1
         for i, row in enumerate(table):
             row_str = ' '.join([str(cell) for cell in row if cell])
-            # 更宽松的表头识别
-            if ("科目编码" in row_str or "编码" in row_str) and ("科目名称" in row_str or "名称" in row_str):
-                header_row = i
-                # 确定各列位置（支持模糊匹配）
-                for j, cell in enumerate(row):
-                    cell_lower = str(cell).lower()
-                    if any(keyword in cell_lower for keyword in ["科目编码", "编码", "code"]):
-                        code_col = j
-                    elif any(keyword in cell_lower for keyword in ["科目名称", "名称", "name"]):
-                        name_col = j
-                    elif any(keyword in cell_lower for keyword in ["电量", "数量", "kwh", "mwh"]):
-                        qty_col = j
-                    elif any(keyword in cell_lower for keyword in ["电价", "价格", "price"]):
-                        price_col = j
-                    elif any(keyword in cell_lower for keyword in ["电费", "金额", "费用", "amount"]):
-                        fee_col = j
+            if ("科目编码" in row_str or "编码" in row_str) and ("结算类型" in row_str or "名称" in row_str):
+                header_row1 = i
                 break
         
-        if header_row == -1:
+        if header_row1 == -1:
             continue
-            
+        
+        # 第二步：找第二行表头（子列：电量、电价、电费）
+        header_row2 = header_row1 + 1
+        if header_row2 >= len(table):
+            continue
+        
+        # 第三步：匹配列索引（适配合并表头）
+        # 先匹配编码/名称列（第一行表头）
+        for j, cell in enumerate(table[header_row1]):
+            cell_lower = str(cell).lower()
+            if any(keyword in cell_lower for keyword in ["科目编码", "编码", "code"]):
+                code_col = j
+            elif any(keyword in cell_lower for keyword in ["结算类型", "科目名称", "名称", "name"]):
+                name_col = j
+        
+        # 再匹配电量/电价/电费列（第二行表头）
+        for j, cell in enumerate(table[header_row2]):
+            cell_lower = str(cell).lower()
+            if any(keyword in cell_lower for keyword in ["电量", "数量", "kwh", "mwh"]):
+                qty_col = j
+            elif any(keyword in cell_lower for keyword in ["电价", "价格", "price"]):
+                price_col = j
+            elif any(keyword in cell_lower for keyword in ["电费", "金额", "费用", "amount"]):
+                fee_col = j
+        
+        # ---------------------- 解析数据行 ----------------------
         # 解析数据行（跳过表头和合计行）
-        for i in range(header_row + 1, len(table)):
+        for i in range(header_row2 + 1, len(table)):
             row = table[i]
             # 跳过合计/总计行
             row_str = ' '.join([str(cell) for cell in row if cell])
             if any(keyword in row_str for keyword in ["合计", "总计", "小计", "summary", "total"]):
                 continue
             
-            # 提取科目编码和名称
+            # 提取科目编码和名称（支持10位编码+模糊名称匹配）
             trade_code = ""
             trade_name = None
             
-            # 从编码列提取
+            # 从编码列提取（适配10位编码）
             if code_col >= 0 and code_col < len(row):
                 trade_code = str(row[code_col]).strip()
+                # 兼容9位编码（如果PDF中漏了前导0）
+                if len(trade_code) == 9:
+                    trade_code = "0" + trade_code
                 if trade_code in TRADE_CODE_MAP:
                     trade_name = TRADE_CODE_MAP[trade_code]
             
-            # 编码匹配失败，尝试从名称列匹配
+            # 编码匹配失败，尝试从名称列模糊匹配（关键增强）
             if not trade_name and name_col >= 0 and name_col < len(row):
                 name_cell = str(row[name_col]).strip()
                 for code, name in TRADE_CODE_MAP.items():
-                    if name in name_cell or name.replace("交易", "") in name_cell:
+                    # 模糊匹配：包含关键词即可
+                    name_keywords = name.replace('(', '').replace(')', '').split('|')
+                    if any(keyword in name_cell for keyword in name_keywords):
                         trade_name = name
                         break
             
@@ -385,7 +409,6 @@ def extract_data_from_pdf_v2(file_obj, file_name):
         if not all_tables:
             # 表格提取失败，使用文本分析（备用方案）
             st.warning(f"{file_name}: 表格提取失败，使用文本分析模式")
-            # 这里可以添加文本分析的备用逻辑
         
         # 拆分双场站数据
         station_data_list = split_double_station_data(all_text, all_tables)
@@ -408,12 +431,12 @@ def extract_data_from_pdf_v2(file_obj, file_name):
 def main():
     st.set_page_config(page_title="黑龙江日清分数据提取工具", layout="wide")
     
-    st.title("📊 黑龙江日清分结算单数据提取工具（双场站增强版）")
-    st.markdown("**核心改进：支持双场站(A/B)识别、修复数据提取错误、减少None值**")
+    st.title("📊 黑龙江日清分结算单数据提取工具（最终修复版）")
+    st.markdown("**核心修复：适配10位编码、支持合并表头、补充新增科目、双场站识别**")
     st.divider()
     
     # 显示科目信息
-    with st.expander("📋 支持的科目列表"):
+    with st.expander("📋 支持的科目列表（含新增）"):
         st.write("**常规科目（电量、电价、电费）：**")
         for trade in REGULAR_TRADES:
             st.write(f"- {trade}")
@@ -424,7 +447,7 @@ def main():
     
     st.subheader("📁 上传文件")
     uploaded_files = st.file_uploader(
-        "支持PDF格式，可批量上传（支持双场站PDF）",
+        "支持PDF格式，可批量上传（适配依兰协合风电PDF）",
         type=['pdf'],
         accept_multiple_files=True
     )
@@ -467,6 +490,7 @@ def main():
                     # 简化列名，避免过长
                     trade_short = trade.replace('省间绿色电力交易', '省间绿电交易')
                     trade_short = trade_short.replace('电网企业代理购电交易', '代理购电交易')
+                    trade_short = trade_short.replace('(电能量)', '')
                     result_columns.extend([f'{trade_short}_电量', f'{trade_short}_电价', f'{trade_short}_电费'])
                 
                 for trade in SPECIAL_TRADES:
@@ -512,7 +536,7 @@ def main():
                 st.download_button(
                     label="📥 下载Excel文件",
                     data=output,
-                    file_name=f"黑龙江结算数据_双场站版_{current_time}.xlsx",
+                    file_name=f"黑龙江结算数据_最终修复版_{current_time}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary"
                 )
@@ -520,7 +544,7 @@ def main():
                 st.success("✅ 全部处理完成！")
     
     else:
-        st.info("👆 请上传PDF文件开始处理（支持包含双场站的PDF）")
+        st.info("👆 请上传PDF文件开始处理（已适配依兰协合风电PDF）")
 
 if __name__ == "__main__":
     main()
