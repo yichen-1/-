@@ -9,16 +9,7 @@ from io import BytesIO
 # 忽略样式警告
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl.stylesheet")
 
-# ---------------------- 核心提取函数（保留原逻辑，适配Streamlit文件对象） ----------------------
-def extract_station_name(pdf_lines):
-    """从PDF内容提取场站名称（优先取公司名称，更精准）"""
-    for line in pdf_lines:
-        if "公司名称:" in line:
-            station_name = re.sub(r'公司名称:\s*', '', line).strip()
-            station_name = re.sub(r'太阳能发电有限公司$', '光伏电站', station_name)
-            return station_name
-    return "未知场站"
-
+# ---------------------- 核心工具函数 ----------------------
 def safe_convert_to_numeric(value, default=None):
     """安全转换为数值，兼容逗号分隔的金额和空值"""
     try:
@@ -32,28 +23,168 @@ def safe_convert_to_numeric(value, default=None):
     except (ValueError, TypeError):
         return default
 
-def extract_trade_data_by_column(trade_name, pdf_lines):
-    """适配黑龙江PDF格式：按"结算类型"匹配，提取电量/电价/电费"""
-    quantity = None
-    price = None
-    fee = None
+def extract_company_name(pdf_lines):
+    """从PDF提取公司名称"""
+    for line in pdf_lines:
+        if "公司名称:" in line:
+            return re.sub(r'公司名称:\s*', '', line).strip()
+    return "未知公司"
 
-    for idx, line in enumerate(pdf_lines):
+def extract_clear_date(pdf_lines):
+    """提取清分日期"""
+    date_pattern = r'清分日期\s*(\d{4}-\d{2}-\d{2})'
+    for line in pdf_lines:
+        date_match = re.search(date_pattern, line)
+        if date_match:
+            return date_match.group(1)
+    return None
+
+def extract_total_data(pdf_lines):
+    """提取文件级合计电量和合计电费"""
+    total_quantity = None
+    total_amount = None
+    for line in pdf_lines:
         line_cols = [col.strip() for col in re.split(r'\s+', line) if col.strip()]
-        if len(line_cols) >= 5 and trade_name in line_cols[1]:
-            quantity = safe_convert_to_numeric(line_cols[2])
-            price = safe_convert_to_numeric(line_cols[3])
-            fee = safe_convert_to_numeric(line_cols[4])
+        if "合计电量" in line_cols and "合计电费" in line_cols:
+            if "合计电量" in line_cols:
+                qty_idx = line_cols.index("合计电量") + 1
+                if qty_idx < len(line_cols):
+                    total_quantity = safe_convert_to_numeric(line_cols[qty_idx])
+            if "合计电费" in line_cols:
+                fee_idx = line_cols.index("合计电费") + 1
+                if fee_idx < len(line_cols):
+                    total_amount = safe_convert_to_numeric(line_cols[fee_idx])
             break
-    return [quantity, price, fee]
+    return total_quantity, total_amount
+
+# ---------------------- 核心提取逻辑（适配多场站+动态科目） ----------------------
+def extract_station_data(pdf_lines, company_name, clear_date, total_quantity, total_amount):
+    """提取单个PDF中的所有场站数据（动态识别科目）"""
+    all_station_data = []
+    station_pattern = r'机组\s+([^:：\s]+风电场)'  # 匹配"机组 双发A风电场"格式
+    current_station = None
+    current_station_meter_qty = None
+    trade_data_started = False  # 标记是否进入交易数据区域
+    all_trade_names = set()  # 收集所有动态识别的科目名称
+
+    # 第一步：扫描所有交易科目名称和场站信息
+    for line in pdf_lines:
+        line = line.strip()
+        # 识别场站切换
+        station_match = re.search(station_pattern, line)
+        if station_match:
+            current_station = station_match.group(1)
+            trade_data_started = False
+            continue
+        
+        # 识别当前场站的计量电量
+        if current_station and "计量电量" in line:
+            meter_qty_match = re.search(r'计量电量\s*(\S+)', line)
+            if meter_qty_match:
+                current_station_meter_qty = safe_convert_to_numeric(meter_qty_match.group(1))
+            continue
+        
+        # 标记交易数据开始（电能量电费下方）
+        if "电能量电费" in line:
+            trade_data_started = True
+            continue
+        
+        # 提取交易科目（结算类型列）
+        if trade_data_started and current_station:
+            line_cols = [col.strip() for col in re.split(r'\s+', line) if col.strip()]
+            # 交易数据行特征：至少5列，第2列为结算类型名称，第3-5列为数值
+            if len(line_cols) >= 5 and line_cols[1] not in ['结算类型', '科目编码'] and not line_cols[1].isdigit():
+                trade_name = line_cols[1]
+                if trade_name not in ['电量', '电价', '电费', '小计']:
+                    all_trade_names.add(trade_name)
+    
+    # 第二步：提取每个场站的具体交易数据
+    current_station = None
+    current_station_meter_qty = None
+    trade_data_started = False
+    station_trade_data = {}
+
+    for line in pdf_lines:
+        line = line.strip()
+        line_cols = [col.strip() for col in re.split(r'\s+', line) if col.strip()]
+        
+        # 场站切换处理（保存上一个场站数据）
+        station_match = re.search(station_pattern, line)
+        if station_match:
+            if current_station and station_trade_data:
+                # 构建当前场站完整数据
+                station_row = {
+                    '公司名称': company_name,
+                    '场站名称': current_station,
+                    '清分日期': clear_date,
+                    '文件合计电量(兆瓦时)': total_quantity,
+                    '文件合计电费(元)': total_amount,
+                    '场站计量电量(兆瓦时)': current_station_meter_qty
+                }
+                # 补充所有交易科目的数据
+                for trade in all_trade_names:
+                    station_row[f'{trade}_电量'] = station_trade_data.get(trade, {}).get('电量')
+                    station_row[f'{trade}_电价'] = station_trade_data.get(trade, {}).get('电价')
+                    station_row[f'{trade}_电费'] = station_trade_data.get(trade, {}).get('电费')
+                all_station_data.append(station_row)
+            
+            # 初始化新场站
+            current_station = station_match.group(1)
+            station_trade_data = {}
+            trade_data_started = False
+            continue
+        
+        # 识别当前场站的计量电量
+        if current_station and "计量电量" in line:
+            meter_qty_match = re.search(r'计量电量\s*(\S+)', line)
+            if meter_qty_match:
+                current_station_meter_qty = safe_convert_to_numeric(meter_qty_match.group(1))
+            continue
+        
+        # 标记交易数据开始
+        if "电能量电费" in line:
+            trade_data_started = True
+            continue
+        
+        # 提取当前交易科目的数据
+        if trade_data_started and current_station and len(line_cols) >= 5:
+            trade_name = line_cols[1]
+            if trade_name in all_trade_names:
+                quantity = safe_convert_to_numeric(line_cols[2])
+                price = safe_convert_to_numeric(line_cols[3])
+                fee = safe_convert_to_numeric(line_cols[4])
+                station_trade_data[trade_name] = {
+                    '电量': quantity,
+                    '电价': price,
+                    '电费': fee
+                }
+    
+    # 保存最后一个场站的数据
+    if current_station and station_trade_data:
+        station_row = {
+            '公司名称': company_name,
+            '场站名称': current_station,
+            '清分日期': clear_date,
+            '文件合计电量(兆瓦时)': total_quantity,
+            '文件合计电费(元)': total_amount,
+            '场站计量电量(兆瓦时)': current_station_meter_qty
+        }
+        for trade in all_trade_names:
+            station_row[f'{trade}_电量'] = station_trade_data.get(trade, {}).get('电量')
+            station_row[f'{trade}_电价'] = station_trade_data.get(trade, {}).get('电价')
+            station_row[f'{trade}_电费'] = station_trade_data.get(trade, {}).get('电费')
+        all_station_data.append(station_row)
+    
+    return all_station_data, list(all_trade_names)
 
 def extract_data_from_pdf(file_obj, file_name):
-    """适配Streamlit：接收文件对象而非路径"""
+    """从PDF文件对象提取数据（支持多场站+动态科目）"""
     try:
         with pdfplumber.open(file_obj) as pdf:
             if not pdf.pages:
                 raise ValueError("PDF无有效页面")
             
+            # 读取所有页面文本
             all_text = ""
             for page in pdf.pages:
                 page_text = page.extract_text()
@@ -63,115 +194,86 @@ def extract_data_from_pdf(file_obj, file_name):
             if not pdf_lines:
                 raise ValueError("PDF为扫描件，无可用文本")
 
-        # 1. 提取场站名称
-        station_name = extract_station_name(pdf_lines)
-
-        # 2. 提取清分日期
-        date = None
-        date_pattern = r'清分日期\s*(\d{4}-\d{2}-\d{2})'
-        for line in pdf_lines:
-            date_match = re.search(date_pattern, line)
-            if date_match:
-                date = date_match.group(1)
-                break
-
-        # 3. 提取合计电量和合计电费
-        total_quantity = None
-        total_amount = None
-        for line in pdf_lines:
-            line_cols = [col.strip() for col in re.split(r'\s+', line) if col.strip()]
-            if "合计电量" in line_cols and "合计电费" in line_cols:
-                if "合计电量" in line_cols:
-                    qty_idx = line_cols.index("合计电量") + 1
-                    if qty_idx < len(line_cols):
-                        total_quantity = safe_convert_to_numeric(line_cols[qty_idx])
-                if "合计电费" in line_cols:
-                    fee_idx = line_cols.index("合计电费") + 1
-                    if fee_idx < len(line_cols):
-                        total_amount = safe_convert_to_numeric(line_cols[fee_idx])
-                break
-
-        # 4. 目标结算科目
-        target_trades = [
-            '优先发电交易',
-            '电网企业代理购电交易',
-            '省内电力直接交易',
-            '送上海省间绿色电力交易(电能量 )',
-            '送辽宁交易',
-            '送华北交易',
-            '送山东交易',
-            '送浙江交易',
-            '省内现货日前交易',
-            '省内现货实时交易',
-            '省间现货日前交易',
-            '省间现货日内交易'
-        ]
-
-        # 5. 提取所有目标科目的数据
-        all_trade_data = []
-        for trade in target_trades:
-            trade_data = extract_trade_data_by_column(trade, pdf_lines)
-            all_trade_data.extend(trade_data)
-
-        return [station_name, date, total_quantity, total_amount] + all_trade_data
+        # 提取基础信息
+        company_name = extract_company_name(pdf_lines)
+        clear_date = extract_clear_date(pdf_lines)
+        total_quantity, total_amount = extract_total_data(pdf_lines)
+        
+        # 提取所有场站数据和动态科目
+        station_data_list, all_trade_names = extract_station_data(
+            pdf_lines, company_name, clear_date, total_quantity, total_amount
+        )
+        
+        return station_data_list, all_trade_names
 
     except Exception as e:
         st.warning(f"处理PDF {file_name} 出错: {str(e)}")
-        return ["未知场站", None, None, None] + [None] * 36
+        return [], []
 
 def extract_data_from_excel(file_obj, file_name):
-    """适配Streamlit：接收文件对象而非路径"""
+    """Excel文件处理（保持原逻辑，适配动态科目）"""
     try:
         df = pd.read_excel(file_obj, dtype=object)
-        station_name = "未知场站"
-        # 从文件名提取场站名
+        company_name = "未知公司"
+        # 从文件名提取公司名
         name_without_ext = file_name.split('.')[0]
         if "晶盛" in name_without_ext:
-            station_name = "大庆晶盛光伏电站"
+            company_name = "大庆晶盛光伏电站"
         
         # 提取日期
         date_match = re.search(r'\d{4}-\d{2}-\d{2}', name_without_ext)
-        date = date_match.group() if date_match else None
+        clear_date = date_match.group() if date_match else None
 
         # 提取合计数据
         total_quantity = safe_convert_to_numeric(df.iloc[0, 3] if len(df) > 0 else None)
         total_amount = safe_convert_to_numeric(df.iloc[0, 5] if len(df) > 0 else None)
 
-        # 目标科目
-        target_trades = [
-            '优先发电交易', '电网企业代理购电交易', '省内电力直接交易',
-            '送上海省间绿色电力交易(电能量 )', '送辽宁交易', '送华北交易',
-            '送山东交易', '送浙江交易', '省内现货日前交易',
-            '省内现货实时交易', '省间现货日前交易', '省间现货日内交易'
+        # 固定基础列（Excel暂按原逻辑处理，可根据实际格式调整）
+        station_data = [{
+            '公司名称': company_name,
+            '场站名称': company_name.replace('有限公司', '场站'),
+            '清分日期': clear_date,
+            '文件合计电量(兆瓦时)': total_quantity,
+            '文件合计电费(元)': total_amount,
+            '场站计量电量(兆瓦时)': total_quantity
+        }]
+        
+        # 默认Excel科目（可根据实际需求调整）
+        excel_trade_names = [
+            '优先发电交易', '电网企业代理购电交易', '省内电力直接交易'
         ]
-
-        all_trade_data = []
-        for _ in target_trades:
-            all_trade_data.extend([None, None, None])
-
-        return [station_name, date, total_quantity, total_amount] + all_trade_data
+        
+        return station_data, excel_trade_names
 
     except Exception as e:
         st.warning(f"处理Excel {file_name} 出错: {str(e)}")
-        return ["未知场站", None, None, None] + [None] * 36
+        return [], []
 
-def calculate_summary_row(data_df):
-    """计算汇总行（求和电量/电费，平均电价）"""
-    sum_cols = [col for col in data_df.columns if any(key in col for key in ['电量', '电费'])]
-    avg_cols = [col for col in data_df.columns if '电价' in col]
-
-    summary_row = {'场站名称': '总计', '清分日期': ''}
-    for col in sum_cols:
-        valid_vals = data_df[col].dropna()
-        summary_row[col] = valid_vals.sum() if not valid_vals.empty else 0
-    for col in avg_cols:
-        valid_vals = data_df[col].dropna()
-        summary_row[col] = round(valid_vals.mean(), 3) if not valid_vals.empty else None
-
+# ---------------------- 数据汇总与导出 ----------------------
+def calculate_summary_row(data_df, all_trade_names):
+    """计算汇总行（适配动态科目）"""
+    summary_row = {
+        '公司名称': '总计',
+        '场站名称': '总计',
+        '清分日期': '',
+        '文件合计电量(兆瓦时)': data_df['文件合计电量(兆瓦时)'].dropna().sum(),
+        '文件合计电费(元)': data_df['文件合计电费(元)'].dropna().sum(),
+        '场站计量电量(兆瓦时)': data_df['场站计量电量(兆瓦时)'].dropna().sum()
+    }
+    
+    # 汇总各交易科目的数据
+    for trade in all_trade_names:
+        summary_row[f'{trade}_电量'] = data_df[f'{trade}_电量'].dropna().sum()
+        summary_row[f'{trade}_电费'] = data_df[f'{trade}_电费'].dropna().sum()
+        # 电价取平均值（排除0值）
+        price_vals = data_df[f'{trade}_电价'].dropna()
+        price_vals = price_vals[price_vals > 0]
+        summary_row[f'{trade}_电价'] = round(price_vals.mean(), 3) if not price_vals.empty else None
+    
     return pd.DataFrame([summary_row])
 
 def to_excel_bytes(df, report_df):
-    """将DataFrame转为Excel字节流，用于下载"""
+    """将DataFrame转为Excel字节流"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='结算数据明细', index=False)
@@ -179,18 +281,18 @@ def to_excel_bytes(df, report_df):
     output.seek(0)
     return output
 
-# ---------------------- Streamlit 页面布局与交互 ----------------------
+# ---------------------- Streamlit 页面布局 ----------------------
 def main():
-    st.set_page_config(page_title="黑龙江日清分数据提取", layout="wide")
+    st.set_page_config(page_title="黑龙江日清分数据提取（多场站版）", layout="wide")
     
     # 页面标题
-    st.title("📊 黑龙江日清分结算单数据提取工具")
+    st.title("📊 黑龙江日清分结算单数据提取工具（支持多场站+动态科目）")
     st.divider()
 
     # 1. 文件上传区域
     st.subheader("📁 上传文件")
     uploaded_files = st.file_uploader(
-        "支持PDF/Excel格式，可批量上传",
+        "支持PDF/Excel格式，可批量上传（PDF自动识别多场站和动态科目）",
         type=['pdf', 'xlsx'],
         accept_multiple_files=True
     )
@@ -200,7 +302,8 @@ def main():
         st.divider()
         st.subheader("⚙️ 处理进度")
         
-        all_data = []
+        all_station_data = []
+        all_trade_names = set()  # 收集所有文件的交易科目
         total_files = len(uploaded_files)
         processed_files = 0
 
@@ -214,13 +317,14 @@ def main():
             
             # 根据文件类型调用对应提取函数
             if file_name.lower().endswith('.pdf'):
-                data = extract_data_from_pdf(file, file_name)
+                station_data, trade_names = extract_data_from_pdf(file, file_name)
             else:
-                data = extract_data_from_excel(file, file_name)
+                station_data, trade_names = extract_data_from_excel(file, file_name)
             
-            # 验证数据有效性
-            if data[1] is not None and any(isinstance(val, (float, int)) for val in data[2:] if val is not None):
-                all_data.append(data)
+            # 累积数据和科目
+            if station_data:
+                all_station_data.extend(station_data)
+                all_trade_names.update(trade_names)
                 processed_files += 1
             
             # 更新进度
@@ -230,38 +334,39 @@ def main():
         status_text.text("处理完成！")
 
         # 3. 结果展示与导出
-        if all_data:
+        if all_station_data and all_trade_names:
             st.divider()
             st.subheader("📈 提取结果")
             
-            # 构建结果DataFrame
-            result_columns = [
-                '场站名称', '清分日期', '合计电量(兆瓦时)', '合计电费(元)',
-                '优先发电交易_电量', '优先发电交易_电价', '优先发电交易_电费',
-                '电网企业代理购电_电量', '电网企业代理购电_电价', '电网企业代理购电_电费',
-                '省内电力直接交易_电量', '省内电力直接交易_电价', '省内电力直接交易_电费',
-                '送上海省间绿电交易_电量', '送上海省间绿电交易_电价', '送上海省间绿电交易_电费',
-                '送辽宁交易_电量', '送辽宁交易_电价', '送辽宁交易_电费',
-                '送华北交易_电量', '送华北交易_电价', '送华北交易_电费',
-                '送山东交易_电量', '送山东交易_电价', '送山东交易_电费',
-                '送浙江交易_电量', '送浙江交易_电价', '送浙江交易_电费',
-                '省内现货日前交易_电量', '省内现货日前交易_电价', '省内现货日前交易_电费',
-                '省内现货实时交易_电量', '省内现货实时交易_电价', '省内现货实时交易_电费',
-                '省间现货日前交易_电量', '省间现货日前交易_电价', '省间现货日前交易_电费',
-                '省间现货日内交易_电量', '省间现货日内交易_电价', '省间现货日内交易_电费'
+            # 构建结果列名（基础列 + 动态科目列）
+            base_columns = [
+                '公司名称', '场站名称', '清分日期',
+                '文件合计电量(兆瓦时)', '文件合计电费(元)', '场站计量电量(兆瓦时)'
             ]
+            trade_columns = []
+            for trade in sorted(all_trade_names):
+                trade_columns.extend([f'{trade}_电量', f'{trade}_电价', f'{trade}_电费'])
+            result_columns = base_columns + trade_columns
 
-            result_df = pd.DataFrame(all_data, columns=result_columns)
-            num_cols = result_df.columns[2:]
-            result_df[num_cols] = result_df[num_cols].apply(pd.to_numeric, errors='coerce')
+            # 构建DataFrame并格式化
+            result_df = pd.DataFrame(all_station_data)
+            # 补充缺失的列（不同文件可能有不同科目）
+            for col in result_columns:
+                if col not in result_df.columns:
+                    result_df[col] = None
+            # 只保留目标列
+            result_df = result_df[result_columns]
+            # 数值列格式化
+            numeric_cols = [col for col in result_columns if any(key in col for key in ['电量', '电价', '电费'])]
+            result_df[numeric_cols] = result_df[numeric_cols].apply(pd.to_numeric, errors='coerce')
 
-            # 排序并格式化日期
+            # 排序
             result_df['清分日期'] = pd.to_datetime(result_df['清分日期'], errors='coerce')
-            result_df = result_df.sort_values(['场站名称', '清分日期']).reset_index(drop=True)
+            result_df = result_df.sort_values(['公司名称', '场站名称', '清分日期']).reset_index(drop=True)
             result_df['清分日期'] = result_df['清分日期'].dt.strftime('%Y-%m-%d').fillna('')
 
             # 添加汇总行
-            summary_row = calculate_summary_row(result_df)
+            summary_row = calculate_summary_row(result_df, all_trade_names)
             result_df = pd.concat([result_df, summary_row], ignore_index=True)
 
             # 生成处理报告
@@ -272,9 +377,9 @@ def main():
             valid_rows = len(result_df) - 1
 
             report_df = pd.DataFrame({
-                '统计项': ['文件总数', '成功处理数', '失败数', '处理成功率', '涉及场站数', '有效数据行数'],
+                '统计项': ['文件总数', '成功处理数', '失败数', '处理成功率', '涉及场站数', '有效数据行数', '识别科目数'],
                 '数值': [total_files, processed_files, failed_files,
-                         success_rate, station_count, valid_rows]
+                         success_rate, station_count, valid_rows, len(all_trade_names)]
             })
 
             # 展示结果表格
@@ -303,14 +408,15 @@ def main():
             st.info(
                 f"""处理完成！
                 - 总计上传 {total_files} 个文件，成功处理 {processed_files} 个（成功率 {success_rate}）
-                - 涉及 {station_count} 个场站，{valid_rows} 行有效数据
+                - 识别到 {len(all_trade_names)} 个交易科目，涉及 {station_count} 个场站，{valid_rows} 行有效数据
+                - PDF文件已自动拆分多场站数据，科目随结算单动态更新
                 """
             )
         else:
             st.warning("⚠️ 未提取到有效数据！请检查：")
             st.markdown("""
                 1. PDF是否为可复制文本（非扫描件）；
-                2. 文件是否为黑龙江日清分格式；
+                2. 文件是否为黑龙江日清分格式（包含"机组 某某风电场"标识）；
                 3. Excel文件格式是否匹配。
             """)
 
