@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl.stylesheet")
 
-# ---------------------- 核心配置（恢复核心逻辑） ----------------------
+# ---------------------- 核心配置（新增晶盛光伏站变体） ----------------------
 REDUNDANT_KEYWORDS = [
     "内部使用", "CONFIDENTIAL", "草稿", "现货试结算期间", "日清分单据",
     "公司名称", "编号：", "单位：", "清分日期", "合计电量", "合计电费",
@@ -19,7 +19,6 @@ REDUNDANT_KEYWORDS = [
     "ylxxhfd", "yxxchfd", "依兰县协合风力发电有限公司", "依", "依兰", "协合",
     "县", "风力发电", "有限公司", "司"
 ]
-# 科目编码-名称映射（恢复完整）
 TRADE_CODE_MAP = {
     "0101010101": "优先发电交易",
     "0101020101": "电网企业代理购电交易", 
@@ -78,40 +77,47 @@ DATA_RULES = {
     "电价(元/兆瓦时)": {"min": 0, "max": 2000},
     "电费(元)": {"min": -10000, "max": 10000000}
 }
-# 场站配置（保留变体但不影响核心数据）
-STATION_CORE_NAMES = ["双发A风电场", "双发B风电场", "晶盛光伏电站"]
-STATION_SPLIT_KEYWORDS = ["机组", "机组名称", "双发A", "双发B", "风场", "风电场"]
-STATION_TYPE_KEYWORDS = ["风电场", "风场", "光伏电站", "电站", "场站"]
-EXCLUDE_KEYWORDS = ["计量电量", "计量量", "电量", "电价", "电费", "合计", "小计"]
-# 仅针对场站名称的数字过滤（不影响编码/数据）
-STATION_NUMBER_PATTERN = re.compile(r'\s+\d+\.?\d*')  # 匹配“ 1167.741”这类场站后的数字
+# 1. 新增晶盛光伏站变体，覆盖“晶盛光伏站”→“晶盛光伏电站”
+STATION_CORE_NAMES = [
+    "双发A风电场", "双发B风电场", 
+    "晶盛光伏电站", "晶盛光伏站",  # 新增晶盛变体
+    "晶盛光伏",  # 极简变体
+    "双A风场", "双B风场", "双发A", "双发B"
+]
+STATION_SPLIT_KEYWORDS = ["机组", "机组名称", "双发A", "双发B", "晶盛", "风场", "风电场", "光伏"]
+# 2. 新增“光伏站”类型关键词，便于识别补全
+STATION_TYPE_KEYWORDS = ["风电场", "风场", "光伏电站", "光伏站", "电站", "场站"]
+# 3. 确保“计量量”在最前，优先截断
+EXCLUDE_KEYWORDS = ["计量量", "计量电量", "电量", "电价", "电费", "合计", "小计"]
+# 仅针对场站名称的数字/冗余过滤
+STATION_NUMBER_PATTERN = re.compile(r'\s+\d+\.?\d*')
+# 场站名称冗余词正则（匹配“ 计量量”“ 计量电量”）
+STATION_REDUNDANT_PATTERN = re.compile(r'\s+(计量量|计量电量|电量|电价|电费)')
 
-# ---------------------- 核心工具函数（恢复+精准优化） ----------------------
+# ---------------------- 核心工具函数（晶盛名称修复） ----------------------
 def remove_redundant_text(text):
-    """恢复核心：仅清理冗余文本/乱码，不删除数字（保留编码/电量/电费）"""
     if not text:
         return ""
     cleaned = str(text).strip()
-    # 1. 清理冗余关键词
     for keyword in REDUNDANT_KEYWORDS:
-        if keyword not in ["机组", "电量", "电价", "电费"]:  # 保留业务关键词
+        if keyword not in ["机组", "电量", "电价", "电费", "晶盛"]:  # 保留晶盛关键词
             cleaned = cleaned.replace(keyword, "")
-    # 2. 清理单个乱码字符（不删数字）
     single_watermarks = ["依", "兰", "协", "合", "县", "电", "力", "发", "限", "司"]
     for char in single_watermarks:
         cleaned = cleaned.replace(char, "")
-    # 3. 清理空白和特殊字符（保留数字和编码）
     cleaned = re.sub(r'\s+', ' ', cleaned)
     cleaned = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\.\-\:\s]', '', cleaned)
     return cleaned.strip()
 
 def clean_station_name(station_name):
-    """精准：仅清理场站名称中的数字/冗余，不影响其他字段"""
+    """核心修复：晶盛光伏站补全+冗余词截断"""
     if not station_name or station_name == "未知场站":
         return "未知场站"
-    # 1. 剔除场站名称后的数字（如“双A风场 1167.741”→“双A风场”）
-    cleaned = STATION_NUMBER_PATTERN.sub('', station_name)
-    # 2. 标准化场站名称
+    # 1. 先剔除场站名称后的冗余词（如“晶盛光伏站 计量量”→“晶盛光伏站”）
+    cleaned = STATION_REDUNDANT_PATTERN.sub('', station_name)
+    # 2. 剔除数字（如“晶盛光伏站 123”→“晶盛光伏站”）
+    cleaned = STATION_NUMBER_PATTERN.sub('', cleaned)
+    # 3. 标准化名称：补全“晶盛光伏站”→“晶盛光伏电站”
     standard_map = {
         "双发A风电场": "双发A风电场",
         "双发B风电场": "双发B风电场",
@@ -120,12 +126,20 @@ def clean_station_name(station_name):
         "双发A": "双发A风电场",
         "双发B": "双发B风电场",
         "双A": "双发A风电场",
-        "双B": "双发B风电场"
+        "双B": "双发B风电场",
+        # 新增晶盛光伏站标准化映射
+        "晶盛光伏电站": "晶盛光伏电站",
+        "晶盛光伏站": "晶盛光伏电站",
+        "晶盛光伏": "晶盛光伏电站"
     }
+    # 优先匹配标准化名称
     for variant, standard in standard_map.items():
         if variant in cleaned:
             return standard
-    # 3. 兜底保留有效场站名
+    # 4. 兜底：补全光伏站→光伏电站
+    if "光伏站" in cleaned:
+        return cleaned.replace("光伏站", "光伏电站")
+    # 5. 保留其他有效场站名
     for type_key in STATION_TYPE_KEYWORDS:
         if type_key in cleaned:
             match = re.search(r'([^，。\n]+' + type_key + ')', cleaned)
@@ -134,19 +148,30 @@ def clean_station_name(station_name):
     return cleaned.strip()
 
 def extract_station_from_text(pdf_text):
-    """恢复：从文本提取场站，仅清理场站后的数字"""
+    """修复：优先提取晶盛光伏相关名称"""
     clean_text = remove_redundant_text(pdf_text)
-    station_patterns = [
-        r'机组[:：\s]*([^，。\n]+风电场|[^，。\n]+风场)',
-        r'机组名称[:：\s]*([^，。\n]+风电场|[^，。\n]+风场)',
-        r'(双发[AB]风电场|双[AB]风场|双发[AB]|双[AB])'
+    # 1. 优先匹配晶盛光伏相关（确保不遗漏）
+    jingsheng_patterns = [
+        r'机组[:：\s]*([^，。\n]+晶盛[^，。\n]+光伏电站|[^，。\n]+晶盛[^，。\n]+光伏站)',
+        r'机组名称[:：\s]*([^，。\n]+晶盛[^，。\n]+光伏电站|[^，。\n]+晶盛[^，。\n]+光伏站)',
+        r'(晶盛光伏电站|晶盛光伏站|晶盛光伏)'
     ]
-    for pattern in station_patterns:
+    for pattern in jingsheng_patterns:
         match = re.search(pattern, clean_text)
         if match:
             raw_name = match.group(1).strip()
             return clean_station_name(raw_name)
-    # 兜底
+    # 2. 匹配双发风电场
+    shuangfa_patterns = [
+        r'机组[:：\s]*([^，。\n]+双发[^，。\n]+风电场|[^，。\n]+双发[^，。\n]+风场)',
+        r'(双发A风电场|双发B风电场|双A风场|双B风场|双发A|双发B)'
+    ]
+    for pattern in shuangfa_patterns:
+        match = re.search(pattern, clean_text)
+        if match:
+            raw_name = match.group(1).strip()
+            return clean_station_name(raw_name)
+    # 3. 兜底提取
     for type_key in STATION_TYPE_KEYWORDS:
         match = re.search(r'([^，。\n]+' + type_key + ')', clean_text)
         if match:
@@ -155,29 +180,30 @@ def extract_station_from_text(pdf_text):
     return "未知场站"
 
 def extract_station_from_filename(file_name):
-    """恢复：从文件名提取场站，不删除数字（避免影响日期）"""
+    """修复：从文件名提取晶盛光伏站"""
     if not file_name:
         return "未知场站"
-    name_patterns = [
-        r'(双发[AB]风电场|双[AB]风场|双发[AB]|双[AB])',
-        r'([^_]+双发[AB][^_]+)',
-        r'([^_]+双[AB][^_]+)'
-    ]
-    for pattern in name_patterns:
-        match = re.search(pattern, file_name)
+    # 1. 优先匹配晶盛光伏
+    if "晶盛" in file_name and "光伏" in file_name:
+        return "晶盛光伏电站"
+    # 2. 匹配双发风电场
+    if "双发" in file_name or "双A" in file_name or "双B" in file_name:
+        shuangfa_match = re.search(r'(双发[AB]风电场|双[AB]风场|双发[AB]|双[AB])', file_name)
+        if shuangfa_match:
+            return clean_station_name(shuangfa_match.group(1))
+    # 3. 兜底
+    for type_key in STATION_TYPE_KEYWORDS:
+        match = re.search(r'([^_]+' + type_key + ')', file_name)
         if match:
-            raw_name = match.group(1).strip()
-            return clean_station_name(raw_name)
+            return clean_station_name(match.group(1))
     return "未知场站"
 
 def safe_convert_to_numeric(value, data_type=""):
-    """完全恢复：正常转换数字（编码/电量/电费）"""
     if value is None or pd.isna(value) or value == '':
         return None
     val_str = remove_redundant_text(value)
-    # 保留科目编码（10位数字）不过滤
     if re.match(r'^\d{9,10}$', val_str):
-        return val_str  # 编码返回字符串，避免丢失前导0
+        return val_str
     if val_str in ['-', '.', '', '—', '——']:
         return None
     try:
@@ -194,7 +220,6 @@ def safe_convert_to_numeric(value, data_type=""):
         return None
 
 def extract_company_info(pdf_text, file_name):
-    """恢复：正常提取公司名称"""
     clean_text = remove_redundant_text(pdf_text)
     company_name = "未知发电公司"
     company_match = re.search(r'公司名称[:：]\s*([^，。\n]+公司)', clean_text)
@@ -207,7 +232,6 @@ def extract_company_info(pdf_text, file_name):
     return company_name
 
 def extract_clear_date(pdf_text, file_name):
-    """恢复：正常提取日期"""
     raw_text = str(pdf_text).strip()
     date = None
     date_patterns = [
@@ -234,10 +258,8 @@ def extract_clear_date(pdf_text, file_name):
     return date
 
 def split_double_station_tables(all_tables, pdf_text, file_name):
-    """恢复：正常拆分双场站表格，不丢失数据行"""
     clean_text = remove_redundant_text(pdf_text)
     merged_rows = []
-    # 恢复：完整合并所有表格行（不剔除任何含数字的行）
     for table in all_tables:
         if not table:
             continue
@@ -254,7 +276,6 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
     current_segment = []
     current_station = extract_station_from_text(pdf_text)
     
-    # 恢复：正常识别场站切换，不遗漏数据
     for row in merged_rows:
         row_str = ''.join(row).replace(" ", "")
         has_station_key = any(keyword in row_str for keyword in STATION_SPLIT_KEYWORDS)
@@ -263,28 +284,28 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
             if current_segment:
                 cleaned_station = clean_station_name(current_station)
                 station_segments.append((cleaned_station, current_segment))
-            # 提取当前场站
             row_text = ' '.join(row)
-            station_match = re.search(r'机组[:：\s]*([^，。\n]+)', row_text) or re.search(r'(双发[AB]|双[AB])', row_text)
-            if station_match:
-                current_station = station_match.group(1).strip()
+            # 优先识别晶盛光伏
+            if "晶盛" in row_text and "光伏" in row_text:
+                current_station = "晶盛光伏电站"
+            else:
+                station_match = re.search(r'机组[:：\s]*([^，。\n]+)', row_text) or re.search(r'(双发[AB]|双[AB])', row_text)
+                if station_match:
+                    current_station = station_match.group(1).strip()
             current_segment = [row]
         else:
             current_segment.append(row)
     
-    # 保存最后一段
     if current_segment:
         cleaned_station = clean_station_name(current_station)
         if cleaned_station == "未知场站":
             cleaned_station = extract_station_from_filename(file_name)
         station_segments.append((cleaned_station, current_segment))
     
-    # 恢复：过滤无效段但保留有效数据
     valid_segments = [(s, seg) for s, seg in station_segments if len(seg) >= 2 or s != "未知场站"]
     return valid_segments if valid_segments else [(extract_station_from_filename(file_name), merged_rows)]
 
 def get_trade_name(trade_code, trade_text):
-    """恢复：正常匹配科目名称"""
     if trade_code in TRADE_CODE_MAP:
         return TRADE_CODE_MAP[trade_code]
     for key, name in TRADE_KEYWORDS.items():
@@ -293,11 +314,9 @@ def get_trade_name(trade_code, trade_text):
     return "未识别科目"
 
 def parse_single_station_data(station_name, table_segment, company_name, clear_date):
-    """恢复：完整解析科目数据，不丢失任何有效科目"""
     trade_records = []
     valid_rows = []
     
-    # 恢复：正常过滤无效行，保留含编码/数据的行
     for row in table_segment:
         if not row:
             continue
@@ -306,7 +325,6 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         is_empty = all(cell == '' for cell in row_clean)
         is_header = any(keyword in row_str for keyword in ["科目编码", "结算类型", "电量", "电价", "电费"])
         
-        # 恢复：正常判断有效行（含编码/关键词/数据）
         has_code = any(re.match(r'^\d{9,10}$', cell.replace(" ", "")) for cell in row_clean)
         has_trade_key = any(key in row_str for key in TRADE_KEYWORDS.keys())
         has_valid_data = any(safe_convert_to_numeric(cell) is not None for cell in row_clean if cell not in ['', '-'])
@@ -317,7 +335,6 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
     if len(valid_rows) < 2:
         return trade_records
     
-    # 恢复：正常定位列（编码/名称/电量/电价/电费）
     cols = {"code": -1, "name": -1, "qty": -1, "price": -1, "fee": -1}
     header_idx = -1
     for idx, row in enumerate(valid_rows[:3]):
@@ -341,11 +358,9 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         elif "电费" in cell_clean or "金额" in cell_clean:
             cols["fee"] = col_idx
     
-    # 恢复：兜底列顺序，确保数据能提取
     if any(v == -1 for v in cols.values()) and len(header_row) >= 5:
         cols = {"code": 0, "name": 1, "qty": 2, "price": 3, "fee": 4}
     
-    # 恢复：完整解析每一行数据
     data_start_idx = header_idx + 1
     for row_idx in range(data_start_idx, len(valid_rows)):
         row = valid_rows[row_idx]
@@ -355,7 +370,6 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         if "合计" in row_str and not is_subtotal:
             continue
         
-        # 恢复：正常提取编码和名称
         trade_code = row[cols["code"]].strip().replace(" ", "") if (cols["code"] < len(row)) else ""
         trade_text = row[cols["name"]].strip() if (cols["name"] < len(row)) else ""
         trade_name = get_trade_name(trade_code, trade_text)
@@ -363,7 +377,6 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         if trade_name == "未识别科目" and not is_subtotal:
             continue
         
-        # 恢复：正常提取小计数据
         if is_subtotal:
             subtotal_qty = None
             subtotal_fee = None
@@ -384,12 +397,10 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
             })
             continue
         
-        # 恢复：正常提取科目数据
         quantity = safe_convert_to_numeric(row[cols["qty"]], "电量(兆瓦时)") if (cols["qty"] < len(row)) else None
         price = safe_convert_to_numeric(row[cols["price"]], "电价(元/兆瓦时)") if (cols["price"] < len(row)) else None
         fee = safe_convert_to_numeric(row[cols["fee"]], "电费(元)") if (cols["fee"] < len(row)) else None
         
-        # 恢复：特殊科目处理
         if "阻塞费用" in trade_name or "价差费用" in trade_name or "辅助服务" in trade_name or "偏差考核" in trade_name:
             quantity = None
             price = None
@@ -411,14 +422,13 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
     
     return trade_records
 
-# ---------------------- 主解析函数（完全恢复功能） ----------------------
+# ---------------------- 主解析函数 ----------------------
 def parse_pdf_final(file_obj, file_name):
     try:
         file_obj.seek(0)
         file_bytes = BytesIO(file_obj.read())
         file_bytes.seek(0)
         
-        # 恢复：完整提取PDF文本和表格
         all_text = ""
         all_tables = []
         with pdfplumber.open(file_bytes) as pdf:
@@ -434,19 +444,16 @@ def parse_pdf_final(file_obj, file_name):
                 })
                 all_tables.extend(tables)
         
-        # 恢复：正常提取基础信息
         company_name = extract_company_info(all_text, file_name)
         clear_date = extract_clear_date(all_text, file_name)
         station_segments = split_double_station_tables(all_tables, all_text, file_name)
         
-        # 恢复：正常解析每个场站数据
         all_records = []
         for station_name, table_segment in station_segments:
             final_station = clean_station_name(station_name)
             station_data = parse_single_station_data(final_station, table_segment, company_name, clear_date)
             all_records.extend(station_data)
         
-        # 恢复：去重但保留所有有效数据
         unique_records = []
         seen_keys = set()
         for rec in all_records:
@@ -455,7 +462,6 @@ def parse_pdf_final(file_obj, file_name):
                 seen_keys.add(key)
                 unique_records.append(rec)
         
-        # 恢复：兜底避免空结果
         if not unique_records:
             fallback_station = extract_station_from_filename(file_name)
             unique_records.append({
@@ -487,16 +493,16 @@ def parse_pdf_final(file_obj, file_name):
             "电费(元)": None
         }]
 
-# ---------------------- Streamlit应用（恢复完整功能） ----------------------
+# ---------------------- Streamlit应用 ----------------------
 def main():
-    st.set_page_config(page_title="通用日清分数据提取工具（功能恢复版）", layout="wide")
+    st.set_page_config(page_title="通用日清分数据提取工具（晶盛修复版）", layout="wide")
     
-    st.title("📊 通用现货日清分结算单数据提取工具（双场站完整版）")
-    st.markdown("**核心：恢复所有提取逻辑 | 场站名称精准去冗余 | 科目/数据无丢失**")
+    st.title("📊 通用现货日清分结算单数据提取工具（精准完整版）")
+    st.markdown("**核心修复：晶盛光伏站→晶盛光伏电站 | 计量量冗余剔除 | 双场站正常拆分**")
     st.divider()
     
     uploaded_files = st.file_uploader(
-        "上传PDF文件（支持双场站/多页面）",
+        "上传PDF文件（支持晶盛光伏/双发风电场）",
         type=["pdf"],
         accept_multiple_files=True
     )
@@ -517,7 +523,6 @@ def main():
         
         progress_bar.empty()
         
-        # 恢复：正常显示所有字段
         df = pd.DataFrame(all_results).fillna("")
         display_cols = [
             "公司名称", "场站名称", "清分日期", "科目名称", 
@@ -526,8 +531,7 @@ def main():
         ]
         df_display = df[[col for col in display_cols if col in df.columns]]
         
-        # 恢复：高亮显示
-        st.subheader("📈 批量提取结果（功能完全恢复）")
+        st.subheader("📈 批量提取结果（晶盛名称精准）")
         def highlight_rows(row):
             if row["科目名称"] == "当日小计":
                 return ["background-color: #e6f3ff"] * len(row)
@@ -535,18 +539,18 @@ def main():
                 return ["background-color: #f0fff4"] * len(row)
             elif row["场站名称"] == "双发B风电场":
                 return ["background-color: #fff8f0"] * len(row)
+            elif row["场站名称"] == "晶盛光伏电站":
+                return ["background-color: #f0f8ff"] * len(row)  # 晶盛光伏站单独高亮
             else:
                 return [""] * len(row)
         styled_df = df_display.style.apply(highlight_rows, axis=1)
         st.dataframe(styled_df, use_container_width=True)
         
-        # 恢复：正常统计
         total_stations = df["场站名称"].nunique()
         total_trades = len(df[(df["科目名称"] != "当日小计") & (df["科目名称"] != "无有效数据") & (df["科目名称"] != "解析失败")])
         subtotal_count = len(df[df["科目名称"] == "当日小计"])
         st.info(f"**统计：** 覆盖场站 {total_stations} 个 | 有效科目 {total_trades} 个 | 小计行 {subtotal_count} 个")
         
-        # 恢复：正常下载Excel
         download_cols = [
             "公司名称", "场站名称", "清分日期", "科目名称", 
             "电量(兆瓦时)", "电价(元/兆瓦时)", "电费(元)"
@@ -572,10 +576,10 @@ def main():
             type="primary"
         )
         
-        st.success("✅ 提取完成！所有核心功能已恢复，场站名称无冗余，科目/数据无丢失")
+        st.success("✅ 提取完成！晶盛光伏站已补全为“晶盛光伏电站”，无冗余词，其他功能正常")
     
     else:
-        st.info("👆 请上传双场站（如双发A/B风电场）的现货日清分结算单PDF")
+        st.info("👆 请上传晶盛光伏电站或双发A/B风电场的现货日清分结算单PDF")
 
 if __name__ == "__main__":
     os.environ["PYTHONIOENCODING"] = "utf-8"
