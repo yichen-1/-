@@ -92,7 +92,7 @@ def extract_general_info(pdf_text, file_name):
     
     # 2. 场站名称：优先从“机组：XXX”提取（用户核心需求）
     station_name = "未知场站"
-   机组_match = re.search(r'机组[:：]\s*([^，。\n]+)', clean_text)  # 匹配“机组：晶盛光伏电站”
+    机组_match = re.search(r'机组[:：]\s*([^，。\n]+)', clean_text)  # 匹配“机组：晶盛光伏电站”
     if 机组_match:
         station_name = 机组_match.group(1).strip()
     else:
