@@ -11,11 +11,11 @@ from openpyxl.styles import PatternFill
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl.stylesheet")
 
-# ---------------------- 核心配置（强化场站匹配） ----------------------
+# ---------------------- 核心配置（强化边界限制） ----------------------
 REDUNDANT_KEYWORDS = [
     "内部使用", "CONFIDENTIAL", "草稿", "现货试结算期间", "日清分单据",
     "公司名称", "编号：", "单位：", "清分日期", "合计电量", "合计电费",
-    "计量电量", "电能量电费", "审批：", "审核：", "编制：", "加盖电子签章",
+    "电能量电费", "审批：", "审核：", "编制：", "加盖电子签章",
     "ylxxhfd", "yxxchfd", "依兰县协合风力发电有限公司", "依", "依兰", "协合",
     "县", "风力发电", "有限公司"
 ]
@@ -77,83 +77,106 @@ DATA_RULES = {
     "电价(元/兆瓦时)": {"min": 0, "max": 2000},
     "电费(元)": {"min": -10000, "max": 10000000}
 }
-# 扩展场站拆分关键词（支持“机组名称”“机组 : ”等格式）
+# 明确排除无关关键词（避免纳入场站名称）
+EXCLUDE_KEYWORDS = ["计量电量", "电量", "电价", "电费", "合计", "小计", "编制", "审核"]
 STATION_SPLIT_KEYWORDS = ["机组", "机组名称", "双发A风电场", "双发B风电场", "A风电场", "B风电场"]
-# 扩展核心场站名称（增加更多可能的表述）
-STATION_CORE_NAMES = ["双发A风电场", "双发B风电场", "晶盛光伏电站", "双发A", "双发B"]
-# 场站类型关键词（用于兜底提取）
+STATION_CORE_NAMES = ["双发A风电场", "双发B风电场", "晶盛光伏电站"]  # 仅保留纯净核心名称
 STATION_TYPE_KEYWORDS = ["风电场", "光伏电站", "储能电站", "电站", "场站"]
 
-# ---------------------- 核心工具函数（全链路修复） ----------------------
+# ---------------------- 核心工具函数（精准截断修复） ----------------------
 def remove_redundant_text(text):
     if not text:
         return ""
     cleaned = str(text).strip()
-    # 保留“机组”关键词（避免误删导致定位失败）
-    temp_cleaned = cleaned
+    # 保留“机组”关键词，清理其他冗余
     for keyword in REDUNDANT_KEYWORDS:
-        if keyword != "机组":  # 跳过“机组”关键词，不清理
-            temp_cleaned = temp_cleaned.replace(keyword, "")
-    # 二次清理单个字符和乱码
+        if keyword != "机组":
+            cleaned = cleaned.replace(keyword, "")
+    # 清理单个字符和乱码
     single_watermarks = ["依", "兰", "协", "合", "县", "电", "力", "发", "限"]
     for char in single_watermarks:
-        temp_cleaned = temp_cleaned.replace(char, "")
-    temp_cleaned = re.sub(r'\s+', ' ', temp_cleaned)
-    temp_cleaned = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\.\-\: ]', '', temp_cleaned)
-    return temp_cleaned.strip()
+        cleaned = cleaned.replace(char, "")
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\.\-\: ]', '', cleaned)
+    return cleaned.strip()
+
+def truncate_station_name(station_name):
+    """新增：精准截断场站名称，排除无关数据（核心修复）"""
+    if not station_name:
+        return "未知场站"
+    # 1. 优先匹配核心名称，直接返回（最精准）
+    for core_name in STATION_CORE_NAMES:
+        if core_name in station_name:
+            return core_name
+    # 2. 遇到排除关键词则截断（如“双发A风电场 计量电量”→“双发A风电场”）
+    for exclude_key in EXCLUDE_KEYWORDS:
+        if exclude_key in station_name:
+            return station_name.split(exclude_key)[0].strip()
+    # 3. 按标点符号截断
+    for separator in ["，", "。", "；", "：", "\n", "\t"]:
+        if separator in station_name:
+            return station_name.split(separator)[0].strip()
+    # 4. 保留含场站类型的部分（避免过长）
+    for type_key in STATION_TYPE_KEYWORDS:
+        if type_key in station_name:
+            type_idx = station_name.find(type_key)
+            return station_name[:type_idx + len(type_key)].strip()
+    return station_name.strip()
 
 def extract_station_from_text(pdf_text):
-    """新增：从全文本中提取场站名称（兜底1）"""
+    """修复：正则增加边界限制，避免包含无关数据"""
     clean_text = remove_redundant_text(pdf_text)
-    # 匹配“机组：XXX风电场”“机组名称：XXX”等格式
-    station_matches = [
-        re.search(r'机组[:：\s]*([^，。\n]+风电场)', clean_text),
-        re.search(r'机组名称[:：\s]*([^，。\n]+风电场)', clean_text),
-        re.search(r'([^，。\n]+双发[AB]风电场)', clean_text)
+    # 正则优化：匹配“机组：XXX风电场”且排除后续无关内容
+    station_patterns = [
+        # 匹配“机组：双发A风电场”，且后面不包含排除关键词
+        r'机组[:：\s]*([^，。\n计量电量]+风电场)',
+        r'机组名称[:：\s]*([^，。\n计量电量]+风电场)',
+        # 精准匹配双发A/B风电场
+        r'(双发[AB]风电场)',
+        r'([^，。\n]+双发[AB]风电场)'
     ]
-    for match in station_matches:
+    for pattern in station_patterns:
+        match = re.search(pattern, clean_text)
         if match:
-            return remove_redundant_text(match.group(1))
-    # 匹配含场站类型的名称
+            raw_name = match.group(1).strip()
+            return truncate_station_name(raw_name)  # 截断处理
+    # 兜底：提取含场站类型的名称
     for type_key in STATION_TYPE_KEYWORDS:
         match = re.search(r'([^，。\n]+' + type_key + ')', clean_text)
         if match:
-            return remove_redundant_text(match.group(1))
+            raw_name = match.group(1).strip()
+            return truncate_station_name(raw_name)
     return "未知场站"
 
 def extract_station_from_filename(file_name):
-    """新增：从文件名提取场站名称（兜底2）"""
-    # 匹配“双发A风电场_XXX.pdf”“XXX_双发B风电场_XXX.pdf”
+    """修复：从文件名提取时也做截断"""
+    if not file_name:
+        return "未知场站"
     name_patterns = [
-        re.search(r'([^_]+双发[AB]风电场)', file_name),
-        re.search(r'(双发[AB]风电场[^_]+)', file_name),
-        re.search(r'([^_]+风电场)', file_name)
+        r'(双发[AB]风电场)',
+        r'([^_]+双发[AB]风电场[^_]+)',
+        r'([^_]+风电场)'
     ]
     for pattern in name_patterns:
-        if pattern:
-            return remove_redundant_text(pattern.group(1))
+        match = re.search(pattern, file_name)
+        if match:
+            raw_name = match.group(1).strip()
+            return truncate_station_name(raw_name)
     return "未知场站"
 
 def clean_station_name(station_name):
-    """强化：场站名称清理，增加多轮匹配"""
+    """修复：增加截断步骤，确保纯净"""
     if not station_name or station_name == "未知场站":
         return "未知场站"
+    # 1. 先清理冗余文本
     cleaned = remove_redundant_text(station_name)
-    # 1. 优先匹配核心名称
+    # 2. 关键步骤：精准截断
+    truncated = truncate_station_name(cleaned)
+    # 3. 最终验证是否为核心名称
     for core_name in STATION_CORE_NAMES:
-        if core_name in cleaned:
-            # 清理核心名称外的冗余字符（如“双发A风电场（1）”→“双发A风电场”）
-            core_match = re.search(f'({core_name})', cleaned)
-            if core_match:
-                return core_match.group(1)
-    # 2. 提取含场站类型的部分
-    for type_key in STATION_TYPE_KEYWORDS:
-        if type_key in cleaned:
-            match = re.search(r'([^，。\n]+' + type_key + ')', cleaned)
-            if match:
-                return match.group(1).strip()
-    # 3. 保留原始清理后的名称（避免返回未知）
-    return cleaned if cleaned else "未知场站"
+        if core_name in truncated:
+            return core_name
+    return truncated if truncated else "未知场站"
 
 def safe_convert_to_numeric(value, data_type=""):
     if value is None or pd.isna(value) or value == '':
@@ -213,10 +236,9 @@ def extract_clear_date(pdf_text, file_name):
     return date
 
 def split_double_station_tables(all_tables, pdf_text, file_name):
-    """修复：增加双兜底，避免未知场站"""
+    """修复：拆分时对场站名称做截断处理"""
     clean_text = remove_redundant_text(pdf_text)
     merged_rows = []
-    # 确保合并所有表格行，不遗漏含“机组”的行
     for table in all_tables:
         if not table:
             continue
@@ -225,7 +247,6 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
             if any(cell.strip() != "" for cell in cleaned_row):
                 merged_rows.append(cleaned_row)
     
-    # 兜底1：若合并后无行，直接从文本/文件名提取场站
     if not merged_rows:
         text_station = extract_station_from_text(pdf_text)
         if text_station != "未知场站":
@@ -235,28 +256,23 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
     
     station_segments = []
     current_segment = []
-    current_station = "未知场站"
-    
-    # 优先从文本提取一个默认场站（避免全程未知）
-    default_station = extract_station_from_text(pdf_text)
-    if default_station != "未知场站":
-        current_station = default_station
+    # 初始场站从文本提取（已截断）
+    current_station = extract_station_from_text(pdf_text)
     
     for row in merged_rows:
         row_str = ''.join(row).replace(" ", "")
-        # 扩展“机组”匹配，支持更多格式
         has_station_key = any(keyword in row_str for keyword in STATION_SPLIT_KEYWORDS)
         
         if has_station_key:
-            # 保存上一段
+            # 保存上一段：场站名称已截断
             if current_segment:
                 cleaned_station = clean_station_name(current_station)
                 station_segments.append((cleaned_station, current_segment))
-            # 提取当前场站名称
-            row_text = ''.join(row)
-            station_match = re.search(r'机组[:：\s]*([^，。\n]+)', row_text) or re.search(r'([^，。\n]+双发[AB]风电场)', row_text)
+            # 提取当前场站并截断
+            row_text = ' '.join([remove_redundant_text(cell) for cell in row])
+            station_match = re.search(r'机组[:：\s]*([^，。\n]+)', row_text) or re.search(r'(双发[AB]风电场)', row_text)
             if station_match:
-                current_station = station_match.group(1)
+                current_station = truncate_station_name(station_match.group(1))
             current_segment = [row]
         else:
             current_segment.append(row)
@@ -264,14 +280,11 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
     # 保存最后一段
     if current_segment:
         cleaned_station = clean_station_name(current_station)
-        # 兜底2：若当前场站仍未知，从文本/文件名补充
         if cleaned_station == "未知场站":
-            cleaned_station = extract_station_from_text(pdf_text)
-            if cleaned_station == "未知场站":
-                cleaned_station = extract_station_from_filename(file_name)
+            cleaned_station = extract_station_from_filename(file_name)
         station_segments.append((cleaned_station, current_segment))
     
-    # 过滤无效段，但保留至少一个段（避免空结果）
+    # 过滤无效段
     valid_segments = [(station, seg) for station, seg in station_segments if len(seg) >= 2 or station != "未知场站"]
     if not valid_segments:
         fallback_station = extract_station_from_filename(file_name)
@@ -399,7 +412,7 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
     
     return trade_records
 
-# ---------------------- 主解析函数（增加场站提取兜底） ----------------------
+# ---------------------- 主解析函数 ----------------------
 def parse_pdf_final(file_obj, file_name):
     try:
         file_obj.seek(0)
@@ -423,15 +436,13 @@ def parse_pdf_final(file_obj, file_name):
         
         company_name = extract_company_info(all_text, file_name)
         clear_date = extract_clear_date(all_text, file_name)
-        # 拆分场站时传入文件名，用于兜底
         station_segments = split_double_station_tables(all_tables, all_text, file_name)
         
         all_records = []
         for station_name, table_segment in station_segments:
-            # 最终兜底：若场站仍未知，从文件名提取
-            if station_name == "未知场站":
-                station_name = extract_station_from_filename(file_name)
-            station_data = parse_single_station_data(station_name, table_segment, company_name, clear_date)
+            # 最终确保场站名称已截断
+            final_station = clean_station_name(station_name)
+            station_data = parse_single_station_data(final_station, table_segment, company_name, clear_date)
             all_records.extend(station_data)
         
         # 去重
@@ -443,7 +454,6 @@ def parse_pdf_final(file_obj, file_name):
                 seen_keys.add(key)
                 unique_records.append(rec)
         
-        # 若仍无数据，补充基础信息（避免空结果）
         if not unique_records:
             fallback_station = extract_station_from_filename(file_name)
             unique_records.append({
@@ -462,7 +472,6 @@ def parse_pdf_final(file_obj, file_name):
     
     except Exception as e:
         st.error(f"PDF解析错误: {str(e)}")
-        # 异常时从文件名提取场站
         fallback_station = extract_station_from_filename(file_name)
         return [{
             "公司名称": "未知发电公司",
@@ -478,10 +487,10 @@ def parse_pdf_final(file_obj, file_name):
 
 # ---------------------- Streamlit应用 ----------------------
 def main():
-    st.set_page_config(page_title="通用日清分数据提取工具（场站修复版）", layout="wide")
+    st.set_page_config(page_title="通用日清分数据提取工具（场站精准版）", layout="wide")
     
     st.title("📊 通用现货日清分结算单数据提取工具（双场站精准版）")
-    st.markdown("**核心修复：场站提取三重兜底 | 避免未知场站 | 双发A/B精准识别**")
+    st.markdown("**核心修复：场站名称精准截断 | 排除计量电量等无关数据 | 双发A/B纯净显示**")
     st.divider()
     
     uploaded_files = st.file_uploader(
@@ -514,13 +523,13 @@ def main():
         ]
         df_display = df[[col for col in display_cols if col in df.columns]]
         
-        st.subheader("📈 批量提取结果（双场站精准拆分）")
+        st.subheader("📈 批量提取结果（场站名称纯净）")
         def highlight_rows(row):
             if row["科目名称"] == "当日小计":
                 return ["background-color: #e6f3ff"] * len(row)
-            elif "双发A" in row["场站名称"]:
+            elif row["场站名称"] == "双发A风电场":
                 return ["background-color: #f0fff4"] * len(row)
-            elif "双发B" in row["场站名称"]:
+            elif row["场站名称"] == "双发B风电场":
                 return ["background-color: #fff8f0"] * len(row)
             else:
                 return [""] * len(row)
@@ -532,7 +541,7 @@ def main():
         subtotal_count = len(df[df["科目名称"] == "当日小计"])
         st.info(f"**统计：** 覆盖场站 {total_stations} 个 | 有效科目 {total_trades} 个 | 小计行 {subtotal_count} 个")
         
-        # 下载Excel（剔除原始编码/文本）
+        # 下载Excel
         download_cols = [
             "公司名称", "场站名称", "清分日期", "科目名称", 
             "电量(兆瓦时)", "电价(元/兆瓦时)", "电费(元)"
@@ -558,7 +567,7 @@ def main():
             type="primary"
         )
         
-        st.success("✅ 提取完成！场站名称已通过三重兜底确保非未知，双发A/B风电场精准识别")
+        st.success("✅ 提取完成！场站名称已精准截断，仅保留“双发A风电场”“双发B风电场”，无无关数据")
     
     else:
         st.info("👆 请上传双场站（如双发A/B风电场）的现货日清分结算单PDF")
