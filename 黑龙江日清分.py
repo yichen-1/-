@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl.stylesheet")
 
-# ---------------------- 核心配置（新增晶盛光伏站变体） ----------------------
+# ---------------------- 核心配置（新增阻塞/价差费用专属配置） ----------------------
 REDUNDANT_KEYWORDS = [
     "内部使用", "CONFIDENTIAL", "草稿", "现货试结算期间", "日清分单据",
     "公司名称", "编号：", "单位：", "清分日期", "合计电量", "合计电费",
@@ -32,8 +32,8 @@ TRADE_CODE_MAP = {
     "0102020301": "省内现货实时交易",
     "0102010101": "省间现货日前交易",
     "0102010201": "省间现货日内交易",
-    "0202030001": "中长期合约阻塞费用",
-    "0202030002": "省间省内价差费用",
+    "0202030001": "中长期合约阻塞费用",  # 重点科目
+    "0202030002": "省间省内价差费用",   # 重点科目
     "0101070101": "现货结算价差调整",
     "0101090101": "辅助服务费用分摊",
     "0101100101": "偏差考核费用",
@@ -66,16 +66,19 @@ TRADE_KEYWORDS = {
     "日融合": "日融合交易",
     "现货日前": "省内现货日前交易",
     "现货实时": "省内现货实时交易",
-    "阻塞费用": "中长期合约阻塞费用",
-    "价差费用": "省间省内价差费用",
+    "阻塞费用": "中长期合约阻塞费用",       # 强化关键词
+    "中长期合约阻塞": "中长期合约阻塞费用", # 新增变体
+    "价差费用": "省间省内价差费用",        # 强化关键词
+    "省间省内价差": "省间省内价差费用",     # 新增变体
     "现货结算": "现货结算价差调整",
     "辅助服务": "辅助服务费用分摊",
     "偏差考核": "偏差考核费用"
 }
+# 调整数据规则：允许阻塞/价差费用的电费为负数且范围更广
 DATA_RULES = {
     "电量(兆瓦时)": {"min": -1000, "max": 5000},
     "电价(元/兆瓦时)": {"min": 0, "max": 2000},
-    "电费(元)": {"min": -10000, "max": 10000000}
+    "电费(元)": {"min": -1000000, "max": 10000000}  # 扩大负数范围
 }
 # 1. 新增晶盛光伏站变体，覆盖“晶盛光伏站”→“晶盛光伏电站”
 STATION_CORE_NAMES = [
@@ -94,7 +97,7 @@ STATION_NUMBER_PATTERN = re.compile(r'\s+\d+\.?\d*')
 # 场站名称冗余词正则（匹配“ 计量量”“ 计量电量”）
 STATION_REDUNDANT_PATTERN = re.compile(r'\s+(计量量|计量电量|电量|电价|电费)')
 
-# ---------------------- 核心工具函数（晶盛名称修复） ----------------------
+# ---------------------- 核心工具函数（重点修复阻塞/价差费用提取） ----------------------
 def remove_redundant_text(text):
     if not text:
         return ""
@@ -199,6 +202,7 @@ def extract_station_from_filename(file_name):
     return "未知场站"
 
 def safe_convert_to_numeric(value, data_type=""):
+    """修复：强化负数处理，适配阻塞/价差费用的负数电费"""
     if value is None or pd.isna(value) or value == '':
         return None
     val_str = remove_redundant_text(value)
@@ -207,14 +211,21 @@ def safe_convert_to_numeric(value, data_type=""):
     if val_str in ['-', '.', '', '—', '——']:
         return None
     try:
+        # 修复：保留负号，正确处理负数
         cleaned = re.sub(r'[^\d\-\.]', '', val_str.replace('，', ',').replace('。', '.'))
         if not cleaned or cleaned in ['-', '.', '-.' , '-.']:
             return None
         num = float(cleaned)
+        # 修复：阻塞/价差费用不受电价最小值限制
         if data_type in DATA_RULES:
             rule = DATA_RULES[data_type]
-            if num < rule["min"] or num > rule["max"]:
-                return None
+            # 电价仅对非阻塞/价差费用做最小值限制
+            if data_type == "电价(元/兆瓦时)" and "阻塞" not in data_type and "价差" not in data_type:
+                if num < rule["min"] or num > rule["max"]:
+                    return None
+            else:
+                if num < rule["min"] or num > rule["max"]:
+                    return None
         return num
     except (ValueError, TypeError):
         return None
@@ -294,7 +305,11 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
                     current_station = station_match.group(1).strip()
             current_segment = [row]
         else:
-            current_segment.append(row)
+            # 修复：保留阻塞/价差费用行
+            if "阻塞费用" in row_str or "价差费用" in row_str:
+                current_segment.append(row)
+            else:
+                current_segment.append(row)
     
     if current_segment:
         cleaned_station = clean_station_name(current_station)
@@ -306,14 +321,24 @@ def split_double_station_tables(all_tables, pdf_text, file_name):
     return valid_segments if valid_segments else [(extract_station_from_filename(file_name), merged_rows)]
 
 def get_trade_name(trade_code, trade_text):
+    """修复：强化阻塞/价差费用的名称匹配"""
+    # 优先匹配编码
     if trade_code in TRADE_CODE_MAP:
         return TRADE_CODE_MAP[trade_code]
+    # 强化关键词匹配
+    trade_text_lower = trade_text.lower()
     for key, name in TRADE_KEYWORDS.items():
-        if key in trade_text:
+        if key in trade_text or key.lower() in trade_text_lower:
             return name
+    # 兜底：直接匹配科目名称
+    if "阻塞费用" in trade_text:
+        return "中长期合约阻塞费用"
+    if "价差费用" in trade_text:
+        return "省间省内价差费用"
     return "未识别科目"
 
 def parse_single_station_data(station_name, table_segment, company_name, clear_date):
+    """核心修复：确保阻塞/价差费用不被跳过"""
     trade_records = []
     valid_rows = []
     
@@ -327,12 +352,15 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         
         has_code = any(re.match(r'^\d{9,10}$', cell.replace(" ", "")) for cell in row_clean)
         has_trade_key = any(key in row_str for key in TRADE_KEYWORDS.keys())
+        # 修复：单独判断阻塞/价差费用的有效数据
+        has_block_spread = "阻塞费用" in row_str or "价差费用" in row_str
         has_valid_data = any(safe_convert_to_numeric(cell) is not None for cell in row_clean if cell not in ['', '-'])
         
-        if (has_code or has_trade_key or has_valid_data) and not is_empty and not is_header:
+        # 修复：阻塞/价差费用行直接判定为有效
+        if (has_code or has_trade_key or has_valid_data or has_block_spread) and not is_empty and not is_header:
             valid_rows.append(row_clean)
     
-    if len(valid_rows) < 2:
+    if len(valid_rows) < 1:  # 放宽行数要求
         return trade_records
     
     cols = {"code": -1, "name": -1, "qty": -1, "price": -1, "fee": -1}
@@ -374,8 +402,14 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
         trade_text = row[cols["name"]].strip() if (cols["name"] < len(row)) else ""
         trade_name = get_trade_name(trade_code, trade_text)
         
-        if trade_name == "未识别科目" and not is_subtotal:
-            continue
+        # 修复：即使是未识别科目，只要是阻塞/价差费用也保留
+        if trade_name == "未识别科目":
+            if "阻塞费用" in trade_text:
+                trade_name = "中长期合约阻塞费用"
+            elif "价差费用" in trade_text:
+                trade_name = "省间省内价差费用"
+            else:
+                continue
         
         if is_subtotal:
             subtotal_qty = None
@@ -397,28 +431,42 @@ def parse_single_station_data(station_name, table_segment, company_name, clear_d
             })
             continue
         
+        # 提取数据
         quantity = safe_convert_to_numeric(row[cols["qty"]], "电量(兆瓦时)") if (cols["qty"] < len(row)) else None
         price = safe_convert_to_numeric(row[cols["price"]], "电价(元/兆瓦时)") if (cols["price"] < len(row)) else None
         fee = safe_convert_to_numeric(row[cols["fee"]], "电费(元)") if (cols["fee"] < len(row)) else None
         
-        if "阻塞费用" in trade_name or "价差费用" in trade_name or "辅助服务" in trade_name or "偏差考核" in trade_name:
+        # 修复：阻塞/价差费用特殊处理
+        if "阻塞费用" in trade_name or "价差费用" in trade_name:
             quantity = None
             price = None
-        
-        if quantity is None and fee is None:
-            continue
-        
-        trade_records.append({
-            "公司名称": company_name,
-            "场站名称": station_name,
-            "清分日期": clear_date,
-            "科目名称": trade_name,
-            "原始科目编码": trade_code,
-            "原始科目文本": trade_text,
-            "电量(兆瓦时)": quantity,
-            "电价(元/兆瓦时)": price,
-            "电费(元)": fee
-        })
+            # 即使fee为None也保留（避免跳过）
+            trade_records.append({
+                "公司名称": company_name,
+                "场站名称": station_name,
+                "清分日期": clear_date,
+                "科目名称": trade_name,
+                "原始科目编码": trade_code,
+                "原始科目文本": trade_text,
+                "电量(兆瓦时)": quantity,
+                "电价(元/兆瓦时)": price,
+                "电费(元)": fee
+            })
+        else:
+            # 其他科目原有逻辑
+            if quantity is None and fee is None:
+                continue
+            trade_records.append({
+                "公司名称": company_name,
+                "场站名称": station_name,
+                "清分日期": clear_date,
+                "科目名称": trade_name,
+                "原始科目编码": trade_code,
+                "原始科目文本": trade_text,
+                "电量(兆瓦时)": quantity,
+                "电价(元/兆瓦时)": price,
+                "电费(元)": fee
+            })
     
     return trade_records
 
@@ -495,14 +543,14 @@ def parse_pdf_final(file_obj, file_name):
 
 # ---------------------- Streamlit应用 ----------------------
 def main():
-    st.set_page_config(page_title="通用日清分数据提取工具（晶盛修复版）", layout="wide")
+    st.set_page_config(page_title="通用日清分数据提取工具（晶盛+阻塞价差修复版）", layout="wide")
     
     st.title("📊 通用现货日清分结算单数据提取工具（精准完整版）")
-    st.markdown("**核心修复：晶盛光伏站→晶盛光伏电站 | 计量量冗余剔除 | 双场站正常拆分**")
+    st.markdown("**核心修复：1.晶盛光伏站→晶盛光伏电站 2.阻塞/价差费用精准提取 3.负数电费正常解析**")
     st.divider()
     
     uploaded_files = st.file_uploader(
-        "上传PDF文件（支持晶盛光伏/双发风电场）",
+        "上传PDF文件（支持晶盛光伏/双发风电场，含阻塞/价差费用）",
         type=["pdf"],
         accept_multiple_files=True
     )
@@ -531,7 +579,7 @@ def main():
         ]
         df_display = df[[col for col in display_cols if col in df.columns]]
         
-        st.subheader("📈 批量提取结果（晶盛名称精准）")
+        st.subheader("📈 批量提取结果（含阻塞/价差费用）")
         def highlight_rows(row):
             if row["科目名称"] == "当日小计":
                 return ["background-color: #e6f3ff"] * len(row)
@@ -540,7 +588,9 @@ def main():
             elif row["场站名称"] == "双发B风电场":
                 return ["background-color: #fff8f0"] * len(row)
             elif row["场站名称"] == "晶盛光伏电站":
-                return ["background-color: #f0f8ff"] * len(row)  # 晶盛光伏站单独高亮
+                return ["background-color: #f0f8ff"] * len(row)
+            elif "阻塞费用" in row["科目名称"] or "价差费用" in row["科目名称"]:
+                return ["background-color: #ffebee"] * len(row)  # 阻塞/价差费用高亮
             else:
                 return [""] * len(row)
         styled_df = df_display.style.apply(highlight_rows, axis=1)
@@ -548,8 +598,9 @@ def main():
         
         total_stations = df["场站名称"].nunique()
         total_trades = len(df[(df["科目名称"] != "当日小计") & (df["科目名称"] != "无有效数据") & (df["科目名称"] != "解析失败")])
+        block_spread_count = len(df[(df["科目名称"] == "中长期合约阻塞费用") | (df["科目名称"] == "省间省内价差费用")])
         subtotal_count = len(df[df["科目名称"] == "当日小计"])
-        st.info(f"**统计：** 覆盖场站 {total_stations} 个 | 有效科目 {total_trades} 个 | 小计行 {subtotal_count} 个")
+        st.info(f"**统计：** 覆盖场站 {total_stations} 个 | 有效科目 {total_trades} 个 | 阻塞/价差费用 {block_spread_count} 个 | 小计行 {subtotal_count} 个")
         
         download_cols = [
             "公司名称", "场站名称", "清分日期", "科目名称", 
@@ -562,24 +613,28 @@ def main():
             df_download.to_excel(writer, index=False, sheet_name="多场站日清分数据")
             ws = writer.sheets["多场站日清分数据"]
             light_blue = PatternFill(start_color="E6F3FF", end_color="E6F3FF", fill_type="solid")
+            light_red = PatternFill(start_color="FFEBEE", end_color="FFEBEE", fill_type="solid")
             for row in range(2, len(df_download) + 2):
                 if df_download.iloc[row-2]["科目名称"] == "当日小计":
                     for col in range(1, len(df_download.columns) + 1):
                         ws.cell(row=row, column=col).fill = light_blue
+                elif "阻塞费用" in df_download.iloc[row-2]["科目名称"] or "价差费用" in df_download.iloc[row-2]["科目名称"]:
+                    for col in range(1, len(df_download.columns) + 1):
+                        ws.cell(row=row, column=col).fill = light_red
         
         output.seek(0)
         st.download_button(
-            label="📥 下载Excel（不含原始编码/文本）",
+            label="📥 下载Excel（含阻塞/价差费用）",
             data=output,
             file_name=f"多场站日清分数据_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
         
-        st.success("✅ 提取完成！晶盛光伏站已补全为“晶盛光伏电站”，无冗余词，其他功能正常")
+        st.success("✅ 提取完成！阻塞/价差费用已正常提取，晶盛光伏站名称已补全")
     
     else:
-        st.info("👆 请上传晶盛光伏电站或双发A/B风电场的现货日清分结算单PDF")
+        st.info("👆 请上传晶盛光伏电站或双发A/B风电场的现货日清分结算单PDF（支持阻塞/价差费用提取）")
 
 if __name__ == "__main__":
     os.environ["PYTHONIOENCODING"] = "utf-8"
