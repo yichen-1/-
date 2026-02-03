@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from openpyxl.styles import PatternFill
-from openpyxl import Workbook
 from io import BytesIO
 
 # -------------------------- 全局配置 --------------------------
@@ -97,13 +96,18 @@ def generate_excel_with_highlight(df):
     return output
 
 # -------------------------- Streamlit 页面 --------------------------
-st.set_page_config(page_title="功率持仓计算工具", layout="wide")
+# 页面配置（兼容Edge浏览器）
+st.set_page_config(
+    page_title="功率持仓计算工具",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 st.title("⚡ 功率-持仓统一时段计算工具")
 st.markdown("""
 **使用说明**：
 1. 上传功率文件（格式：.xls，包含多个日期sheet）
 2. 上传持仓文件（格式：.xlsx，E列存储24时段持仓数据）
-3. 自动计算并展示结果，支持下载带标黄的Excel文件
+3. 点击「开始计算」，自动生成结果并支持下载带标黄的Excel文件
 """)
 
 # 文件上传区域
@@ -113,57 +117,62 @@ with col1:
 with col2:
     position_file = st.file_uploader("上传持仓文件（.xlsx）", type=["xlsx"])
 
-# 计算按钮与结果展示
-if st.button("🚀 开始计算") and power_file and position_file:
-    with st.spinner("正在处理数据..."):
-        # 1. 读取持仓数据
-        positions = get_position_data(position_file)
-        if positions is None:
-            st.stop()
+# 核心修复：仅创建一次按钮，避免重复ID
+calc_button = st.button("🚀 开始计算", type="primary")
 
-        # 2. 读取功率文件所有sheet
-        try:
-            power_xls = pd.ExcelFile(power_file, engine='xlrd')
-            all_dates = power_xls.sheet_names
-            st.success(f"✅ 检测到功率文件共 {len(all_dates)} 个日期：{all_dates}")
-        except Exception as e:
-            st.error(f"功率文件读取失败：{str(e)}")
-            st.stop()
+# 按钮逻辑处理
+if calc_button:
+    # 情况1：按钮点击，但文件未上传完整
+    if not power_file or not position_file:
+        st.warning("⚠️ 请先上传功率文件和持仓文件！")
+    # 情况2：按钮点击，文件齐全，开始计算
+    else:
+        with st.spinner("正在处理数据..."):
+            # 1. 读取持仓数据
+            positions = get_position_data(position_file)
+            if positions is None:
+                st.stop()
 
-        # 3. 计算2月1日基准数据
-        feb1_power = get_valid_power_data(power_file, FEB1_SHEET_NAME)
+            # 2. 读取功率文件所有sheet
+            try:
+                power_xls = pd.ExcelFile(power_file, engine='xlrd')
+                all_dates = power_xls.sheet_names
+                st.success(f"✅ 检测到功率文件共 {len(all_dates)} 个日期：{all_dates}")
+            except Exception as e:
+                st.error(f"功率文件读取失败：{str(e)}")
+                st.stop()
 
-        # 4. 初始化结果表
-        summary_data = {
-            "统一时段（点）": list(range(24)),
-            "持仓值(kWh)": positions
-        }
+            # 3. 计算2月1日基准数据
+            feb1_power = get_valid_power_data(power_file, FEB1_SHEET_NAME)
 
-        # 5. 遍历所有日期计算
-        for date in all_dates:
-            daily_power = get_valid_power_data(power_file, date)
-            daily_power, daily_01, final_balance = calc_unified_balance(daily_power, positions, feb1_power)
-            summary_data[f"{date}_发电量(kWh)"] = daily_power
-            summary_data[f"{date}_0.1倍发电量(kWh)"] = daily_01
-            summary_data[f"{date}_差额(kWh)"] = final_balance
+            # 4. 初始化结果表
+            summary_data = {
+                "统一时段（点）": list(range(24)),
+                "持仓值(kWh)": positions
+            }
 
-        # 6. 生成结果DataFrame
-        result_df = pd.DataFrame(summary_data)
+            # 5. 遍历所有日期计算
+            for date in all_dates:
+                daily_power = get_valid_power_data(power_file, date)
+                daily_power, daily_01, final_balance = calc_unified_balance(daily_power, positions, feb1_power)
+                summary_data[f"{date}_发电量(kWh)"] = daily_power
+                summary_data[f"{date}_0.1倍发电量(kWh)"] = daily_01
+                summary_data[f"{date}_差额(kWh)"] = final_balance
 
-        # 7. 展示结果（Streamlit表格）
-        st.subheader("📊 计算结果预览")
-        st.dataframe(result_df, use_container_width=True)
+            # 6. 生成结果DataFrame
+            result_df = pd.DataFrame(summary_data)
 
-        # 8. 生成带标黄的Excel并提供下载
-        excel_file = generate_excel_with_highlight(result_df)
-        st.download_button(
-            label="📥 下载结果Excel（带负差额标黄）",
-            data=excel_file,
-            file_name="功率持仓计算结果.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            # 7. 展示结果（Streamlit表格）
+            st.subheader("📊 计算结果预览")
+            st.dataframe(result_df, use_container_width=True)
 
-        st.success("🎉 计算完成！所有结果已保留1位小数，负差额自动标黄")
+            # 8. 生成带标黄的Excel并提供下载
+            excel_file = generate_excel_with_highlight(result_df)
+            st.download_button(
+                label="📥 下载结果Excel（带负差额标黄）",
+                data=excel_file,
+                file_name="功率持仓计算结果.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-elif st.button("🚀 开始计算") and (not power_file or not position_file):
-    st.warning("⚠️ 请先上传功率文件和持仓文件！")
+            st.success("🎉 计算完成！所有结果已保留1位小数，负差额自动标黄")
