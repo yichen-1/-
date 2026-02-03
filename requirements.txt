@@ -1,6 +1,6 @@
 # 功率持仓工具核心依赖（兼容组合）
 streamlit>=1.28.0,<1.39.0
-pandas==1.5.3          # 锁定版本，兼容 openpyxl 3.0.9
+pandas==3.1.0          # 锁定版本，兼容 openpyxl 3.0.9
 openpyxl==3.0.9        # 你指定的版本
 xlrd>=2.0.1
 
