@@ -11,7 +11,7 @@ FEB1_SHEET_NAME = "2.1"  # 功率文件中2月1日的sheet名
 def get_position_data(uploaded_file):
     """读取持仓数据（统一24时段：0-23点）"""
     try:
-        # 兼容 openpyxl 3.0.9 的读取方式
+        # 兼容 pandas 1.5.3 + openpyxl 3.0.9 的读取方式
         pos_df = pd.read_excel(uploaded_file, engine='openpyxl', header=0)
         if pos_df.shape[1] < 5:
             st.error("持仓文件列数不足，需至少5列（E列存储持仓数据）")
@@ -83,9 +83,9 @@ def generate_excel_with_highlight(df):
         col_name = ws.cell(row=1, column=col_idx).value
         if col_name and "差额" in str(col_name):
             for row_idx in range(2, ws.max_row + 1):
-                val = ws.cell(row=row_idx, column=col_idx).value
+                val = ws.cell(row_idx, col_idx).value
                 if isinstance(val, (int, float)) and val < 0:
-                    ws.cell(row=row_idx, column=col_idx).fill = yellow_fill
+                    ws.cell(row_idx, col_idx).fill = yellow_fill
 
     wb.save(output)
     output.seek(0)
