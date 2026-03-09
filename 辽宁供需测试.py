@@ -1,9 +1,11 @@
-# 新能源出力预测-实时平衡区间分析工具
+# 新能源出力预测-实时平衡区间分析工具（Windows专用，无固定路径）
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+
+# 解决Windows中文乱码
+plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # ---------------------- 页面设置 ----------------------
@@ -13,7 +15,7 @@ st.markdown("### 功能：自动找平衡点 | 预测越大实际越大 | 预测
 st.divider()
 
 # ---------------------- 上传文件 ----------------------
-uploaded_file = st.file_uploader("上传你的Excel数据文件（运行数据披露.xlsx）", type=["xlsx", "xls"])
+uploaded_file = st.file_uploader("上传你的Excel数据文件", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     # 读取数据
@@ -28,19 +30,13 @@ if uploaded_file is not None:
     st.divider()
 
     # ---------------------- 核心字段识别 ----------------------
-    st.subheader("🔍 自动匹配核心字段")
-    # 匹配新能源预测列（D-3/D-2/D-1）、实时列
-    pred_cols = [col for col in df.columns if any(x in str(col) for x in ['D-3', 'D-2', 'D-1', '新能源预测'])]
-    real_col = [col for col in df.columns if '实时' in str(col) and '新能源' in str(col)][0] if any('实时' in str(col) for col in df.columns) else None
-
+    st.subheader("🔍 选择分析字段")
+    # 手动选择预测列和实时列（最稳定）
     col1, col2 = st.columns(2)
     with col1:
-        selected_pred = st.multiselect("选择预测出力列（D-3/D-2/D-1）", pred_cols, default=pred_cols[:3])
+        selected_pred = st.multiselect("选择预测出力列（D-3/D-2/D-1）", df.columns.tolist())
     with col2:
-        if real_col:
-            st.success(f"自动识别实时出力列：**{real_col}**")
-        else:
-            real_col = st.selectbox("手动选择实时出力列", df.columns)
+        real_col = st.selectbox("选择实时出力列", df.columns.tolist())
 
     st.divider()
 
@@ -54,7 +50,7 @@ if uploaded_file is not None:
         for col in selected_pred:
             df_analysis[f"{col}_偏差"] = df_analysis[real_col] - df_analysis[col]
 
-        # 2. 分区间统计（自动划分10个区间）
+        # 2. 分区间统计
         interval_num = st.slider("划分区间数量", min_value=5, max_value=20, value=10)
         target_pred = st.selectbox("选择要分析的预测版本", selected_pred, index=0)
 
@@ -67,7 +63,7 @@ if uploaded_file is not None:
         stat_df.columns = ['平均偏差', '最小偏差', '最大偏差', '数据量']
         stat_df = stat_df.reset_index()
 
-        # 3. 判定平衡区间
+        # 判定平衡区间
         stat_df['区间判定'] = np.where(stat_df['平均偏差'] > 0, "✅ 实际 > 预测",
                                       np.where(stat_df['平均偏差'] < 0, "❌ 实际 < 预测", "⚖️ 平衡"))
 
@@ -119,7 +115,7 @@ if uploaded_file is not None:
             with pd.ExcelWriter("新能源出力平衡区间分析报告.xlsx") as writer:
                 df_analysis.to_excel(writer, sheet_name="原始数据+偏差", index=False)
                 stat_df.to_excel(writer, sheet_name="区间统计结果", index=False)
-            st.success("✅ 分析报告已生成！直接保存到电脑本地")
+            st.success("✅ 分析报告已生成！保存在代码同一文件夹里")
 
     else:
         st.warning("请选择预测列和实时列！")
