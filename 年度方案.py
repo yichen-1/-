@@ -1,6 +1,6 @@
 # 第一步：调整导入顺序（Streamlit必须放在最顶部）+ 规范格式
 import streamlit as st  # 核心库优先导入
-import uuid  # 生成唯一标识（修复注释格式）
+import uuid  # 生成唯一标识
 import pandas as pd
 import numpy as np
 import os
@@ -10,7 +10,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import matplotlib.pyplot as plt  # 绘图库
 from io import BytesIO
 
-# -------------------------- 工具函数：生成调整说明文本（移到顶部，解决未定义报错） --------------------------
+# -------------------------- 工具函数：生成调整说明文本（移到顶部） --------------------------
 def generate_adjustment_description(month, scheme):
     """生成指定月份和方案的调整说明文本"""
     logs = st.session_state.adjustment_logs[month][scheme]
@@ -33,7 +33,7 @@ def generate_adjustment_description(month, scheme):
             )
     return "\n".join(desc)
 
-# -------------------------- 全局Session State初始化（统一放在导入后，避免缺失） --------------------------
+# -------------------------- 全局Session State初始化 --------------------------
 # 唯一前缀（避免多组件key冲突）
 unique_prefix_ratio_tune = "power_tune"
 
@@ -512,26 +512,154 @@ if st.session_state.calculated:
     if out:
         st.download_button("导出年度方案", data=out, file_name="年度方案.xlsx")
 
-# 方案展示（修复Plotly weight报错）
+# 方案展示（完整恢复电价曲线双轴图表）
 st.divider()
 if st.session_state.calculated:
-    st.header("📈 方案展示")
-    m = st.selectbox("查看月份", st.session_state.selected_months)
+    st.header("📈 方案展示（含价格对比）")
+    view_month = st.selectbox("选择查看的月份", st.session_state.selected_months)
     import plotly.graph_objects as go
     
-    # 方案一图表
-    typ = st.session_state.trade_power_typical[m]
+    # 方案一：交易量+价格双轴图表
+    st.subheader("1. 方案一（典型曲线）")
+    typical_df = st.session_state.trade_power_typical[view_month]
+    base_df = st.session_state.monthly_data[view_month]
+    
+    # 准备数据（确保24时段对齐）
+    merged_data = typical_df[["时段", "方案一月度电量(MWh)"]].copy()
+    if len(base_df) >= 24:
+        merged_data["现货价格"] = base_df["现货价格(元/MWh)"].head(24).values
+        merged_data["中长期价格"] = base_df["中长期价格(元/MWh)"].head(24).values
+    else:
+        merged_data["现货价格"] = 0.0
+        merged_data["中长期价格"] = 0.0
+    
+    # 创建双轴图表
     fig1 = go.Figure()
-    fig1.add_trace(go.Bar(x=typ["时段"], y=typ["方案一月度电量(MWh)"], name="方案一电量"))
-    # 修复：删除weight属性，Plotly不支持
-    fig1.update_layout(title=f"{m}月方案一电量", xaxis_title="时段", yaxis_title="电量(MWh)", title_font=dict(size=13))
+    
+    # 交易量柱状图（左轴）
+    fig1.add_trace(go.Bar(
+        x=merged_data["时段"],
+        y=merged_data["方案一月度电量(MWh)"],
+        name="方案一交易量",
+        yaxis="y1",
+        marker_color="#4299e1",  # 蓝色
+        opacity=0.8
+    ))
+    
+    # 现货价格折线（右轴）
+    fig1.add_trace(go.Scatter(
+        x=merged_data["时段"],
+        y=merged_data["现货价格"],
+        name="现货价格",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#9f7aea", width=2),  # 紫色
+        marker=dict(size=4)
+    ))
+    
+    # 中长期价格折线（右轴）
+    fig1.add_trace(go.Scatter(
+        x=merged_data["时段"],
+        y=merged_data["中长期价格"],
+        name="中长期价格",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#38b2ac", width=2),  # 青色
+        marker=dict(size=4)
+    ))
+    
+    # 布局优化（不使用weight属性）
+    fig1.update_layout(
+        title=f"{view_month}月 方案一交易量与价格对比",
+        title_font=dict(size=13, family="Arial"),  # 修复：删除weight属性
+        title_x=0.5,
+        plot_bgcolor="white",
+        yaxis1=dict(
+            title="交易量（MWh）",
+            title_font=dict(color="#4299e1"),
+            tickfont=dict(color="#4299e1")
+        ),
+        yaxis2=dict(
+            title="价格（元/MWh）",
+            title_font=dict(color="#9f7aea"),
+            tickfont=dict(color="#9f7aea"),
+            overlaying="y",
+            side="right"
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+        margin=dict(l=20, r=20, t=30, b=60)
+    )
     st.plotly_chart(fig1, use_container_width=True)
     
-    # 方案二图表
-    arb = st.session_state.trade_power_arbitrage[m]
+    # 方案二：交易量+价格双轴图表
+    st.subheader("2. 方案二（套利/直线曲线）")
+    arbitrage_df = st.session_state.trade_power_arbitrage[view_month]
+    
+    # 准备数据
+    merged_data2 = arbitrage_df[["时段", "方案二月度电量(MWh)"]].copy()
+    if len(base_df) >= 24:
+        merged_data2["现货价格"] = base_df["现货价格(元/MWh)"].head(24).values
+        merged_data2["中长期价格"] = base_df["中长期价格(元/MWh)"].head(24).values
+    else:
+        merged_data2["现货价格"] = 0.0
+        merged_data2["中长期价格"] = 0.0
+    
+    # 创建双轴图表
     fig2 = go.Figure()
-    fig2.add_trace(go.Bar(x=arb["时段"], y=arb["方案二月度电量(MWh)"], name="方案二电量"))
-    fig2.update_layout(title=f"{m}月方案二电量", xaxis_title="时段", yaxis_title="电量(MWh)", title_font=dict(size=13))
+    
+    # 交易量柱状图（左轴）
+    fig2.add_trace(go.Bar(
+        x=merged_data2["时段"],
+        y=merged_data2["方案二月度电量(MWh)"],
+        name="方案二交易量",
+        yaxis="y1",
+        marker_color="#e53e3e",  # 红色
+        opacity=0.8
+    ))
+    
+    # 现货价格折线（右轴）
+    fig2.add_trace(go.Scatter(
+        x=merged_data2["时段"],
+        y=merged_data2["现货价格"],
+        name="现货价格",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#9f7aea", width=2),
+        marker=dict(size=4)
+    ))
+    
+    # 中长期价格折线（右轴）
+    fig2.add_trace(go.Scatter(
+        x=merged_data2["时段"],
+        y=merged_data2["中长期价格"],
+        name="中长期价格",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#38b2ac", width=2),
+        marker=dict(size=4)
+    ))
+    
+    # 布局优化
+    fig2.update_layout(
+        title=f"{view_month}月 方案二交易量与价格对比",
+        title_font=dict(size=13, family="Arial"),
+        title_x=0.5,
+        plot_bgcolor="white",
+        yaxis1=dict(
+            title="交易量（MWh）",
+            title_font=dict(color="#e53e3e"),
+            tickfont=dict(color="#e53e3e")
+        ),
+        yaxis2=dict(
+            title="价格（元/MWh）",
+            title_font=dict(color="#9f7aea"),
+            tickfont=dict(color="#9f7aea"),
+            overlaying="y",
+            side="right"
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+        margin=dict(l=20, r=20, t=30, b=60)
+    )
     st.plotly_chart(fig2, use_container_width=True)
 
 # -------------------------- 电量调整功能 --------------------------
